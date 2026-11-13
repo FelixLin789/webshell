@@ -354,10 +354,13 @@ const record = (argv, fresh) => fs[fresh ? 'writeFileSync' : 'appendFileSync'](F
 // AI 指定的本机路径（上传、下载、截图）：网页内容可能诱导 AI 去碰敏感位置，这些地方一律拒绝——
 // WebShell 自己的数据（密码本、浏览器登录资料）、点开头的配置目录（.ssh、.aws……）、浏览器资料目录、开机启动目录
 // shortcut: 按位置名拦截，拦不住所有敏感文件；要更严就改成只允许指定的文件夹
-const SENSITIVE = /^(\..+|user data|start menu|startup)$/i;
+// （Windows 的开机启动在 Start Menu\…\Startup，macOS 在 LaunchAgents / LaunchDaemons，浏览器资料在 User Data / Application Support，Linux 的都在点开头的目录里）
+const SENSITIVE = /^(\..+|user data|start menu|startup|launchagents|launchdaemons|application support)$/i;
 function guard(p) {
   let real = path.resolve(p);
-  try { real = fs.realpathSync(real); } catch { /* 还不存在的文件（要写的截图）就按字面路径判断 */ }
+  try { real = fs.realpathSync(real); } catch { // 还不存在的文件（要写的截图）：还原它所在文件夹的真实路径，防止借链接绕过
+    try { real = path.join(fs.realpathSync(path.dirname(real)), path.basename(real)); } catch { /* 文件夹也还不存在：按字面路径判断 */ }
+  }
   const inside = (dir, f) => !path.relative(dir, f).startsWith('..') && !path.isAbsolute(path.relative(dir, f));
   if (inside(path.resolve(HOME), real) || real.split(path.sep).some(s => SENSITIVE.test(s))) {
     throw Object.assign(new Error(`为了安全，不读写这个位置：${real}`), { exit: 2 });
