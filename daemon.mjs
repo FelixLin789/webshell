@@ -351,8 +351,22 @@ const mouse = async (sid, x, y) => {
 };
 const record = (argv, fresh) => fs[fresh ? 'writeFileSync' : 'appendFileSync'](FLOW_FILE, JSON.stringify(argv) + '\n');
 // 截图和 PDF 存成文件，返回完整路径；没给文件名就存到 ~/.webshell/shots
+// AI 指定的本机路径（上传、下载、截图）：网页内容可能诱导 AI 去碰敏感位置，这些地方一律拒绝——
+// WebShell 自己的数据（密码本、浏览器登录资料）、点开头的配置目录（.ssh、.aws……）、浏览器资料目录、开机启动目录
+// shortcut: 按位置名拦截，拦不住所有敏感文件；要更严就改成只允许指定的文件夹
+const SENSITIVE = /^(\..+|user data|start menu|startup)$/i;
+function guard(p) {
+  let real = path.resolve(p);
+  try { real = fs.realpathSync(real); } catch { /* 还不存在的文件（要写的截图）就按字面路径判断 */ }
+  const inside = (dir, f) => !path.relative(dir, f).startsWith('..') && !path.isAbsolute(path.relative(dir, f));
+  if (inside(path.resolve(HOME), real) || real.split(path.sep).some(s => SENSITIVE.test(s))) {
+    throw Object.assign(new Error(`为了安全，不读写这个位置：${real}`), { exit: 2 });
+  }
+  return real;
+}
 const store = (file, ext, base64) => {
-  const out = path.resolve(file ?? path.join(HOME, 'shots', `${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`));
+  const out = file ? guard(file) : path.join(HOME, 'shots', `${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`);
+  if (file && fs.existsSync(out)) throw new Error(`已经有这个文件了，不覆盖：${out}`);
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, Buffer.from(base64, 'base64'));
   return out;
@@ -601,9 +615,9 @@ export const cmds = {
   async upload(p, args) {
     const k = args.indexOf('--to'), to = k < 0 ? null : args.splice(k, 2)[1];
     if (!args.length || (k >= 0 && !to)) throw new Error('用法：upload <文件...> [--to 编号|文字]');
-    const files = args.map(f => path.resolve(f));
-    const missing = files.find(f => !fs.statSync(f, { throwIfNoEntry: false })?.isFile());
+    const missing = args.map(f => path.resolve(f)).find(f => !fs.statSync(f, { throwIfNoEntry: false })?.isFile());
     if (missing) throw new Error(`找不到文件：${missing}`);
+    const files = args.map(guard);
     const r = to ? await pick(p.sid, to, false) : { s: p.sid };
     await call(r.s, 'fileInput', r.i);
     const { result } = await B.send('Runtime.evaluate', { expression: 'window.__file' }, r.s);
@@ -614,7 +628,7 @@ export const cmds = {
 
   async download(p, [t, dir]) {
     if (!t) throw new Error('用法：download <编号|文字> [文件夹]');
-    const folder = path.resolve(dir ?? path.join(os.homedir(), 'Downloads'));
+    const folder = guard(dir ?? path.join(os.homedir(), 'Downloads'));
     fs.mkdirSync(folder, { recursive: true });
     await B.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: folder, eventsEnabled: true });
     try {

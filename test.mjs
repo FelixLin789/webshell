@@ -365,19 +365,32 @@ test('第三方登录：记住的方式是 Google，login 就点“用 Google �
 
 test('上传、下载、截图、PDF、手机模式', async () => {
   await ws('cd', base);
-  const up = path.join(HOME, 'up.txt');
+  const files = fs.mkdtempSync(path.join(os.tmpdir(), 'webshell-files-')); // 普通文件夹；WebShell 自己的数据目录是不让碰的
+  const up = path.join(files, 'up.txt');
   fs.writeFileSync(up, 'hello upload');
+  // 敏感位置一律拒绝：WebShell 的数据目录（密码本、浏览器登录资料）、点开头的配置目录
+  fs.writeFileSync(path.join(HOME, 'secret.txt'), 'x');
+  fs.mkdirSync(path.join(files, '.ssh'));
+  fs.writeFileSync(path.join(files, '.ssh', 'id_rsa'), 'x');
+  for (const args of [['upload', path.join(HOME, 'secret.txt')], ['upload', path.join(files, '.ssh', 'id_rsa')],
+    ['download', 'Get file', path.join(HOME, 'dl')], ['screenshot', path.join(files, '.ssh', 's.png')]]) {
+    const r = await ws(...args);
+    assert.equal(r.code, 2, args.join(' '));
+    assert.match(r.err, /不读写这个位置/);
+  }
   assert.match((await ws('upload', up)).out, /已选好 1 个文件/); // 页面上唯一的上传框，即使它被藏起来了
   await ws('click', 'Send file');
   assert.equal((await ws('cat')).out, 'got=true');
   await ws('cd', base);
-  const saved = (await ws('download', 'Get file', path.join(HOME, 'dl'))).out;
+  const saved = (await ws('download', 'Get file', path.join(files, 'dl'))).out;
   assert.equal(fs.readFileSync(saved, 'utf8'), 'hello file');
-  const png = (await ws('screenshot', path.join(HOME, 's.png'), '--full')).out;
+  const png = (await ws('screenshot', path.join(files, 's.png'), '--full')).out;
   assert.equal(fs.readFileSync(png).subarray(1, 4).toString(), 'PNG');
+  assert.match((await ws('screenshot', png)).err, /不覆盖/); // 已有的文件不覆盖
   assert.equal((await mcpCall('screenshot')).content[1].type, 'image'); // MCP 里直接把图片交给 AI
-  const pdf = (await ws('pdf', path.join(HOME, 'p.pdf'))).out;
+  const pdf = (await ws('pdf', path.join(files, 'p.pdf'))).out;
   assert.equal(fs.readFileSync(pdf).subarray(0, 4).toString(), '%PDF');
+  fs.rmSync(files, { recursive: true, force: true });
   await ws('cd', '/ua');
   await ws('mobile', 'on');
   assert.equal((await ws('cat')).out, 'phone 390');
