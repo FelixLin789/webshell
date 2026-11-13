@@ -357,10 +357,17 @@ const record = (argv, fresh) => fs[fresh ? 'writeFileSync' : 'appendFileSync'](F
 // （Windows 的开机启动在 Start Menu\…\Startup，macOS 在 LaunchAgents / LaunchDaemons，浏览器资料在 User Data / Application Support，Linux 的都在点开头的目录里）
 const SENSITIVE = /^(\..+|user data|start menu|startup|launchagents|launchdaemons|application support)$/i;
 function guard(p) {
-  let real = path.resolve(p);
-  try { real = fs.realpathSync(real); } catch { // 还不存在的文件（要写的截图）：还原它所在文件夹的真实路径，防止借链接绕过
-    try { real = path.join(fs.realpathSync(path.dirname(real)), path.basename(real)); } catch { /* 文件夹也还不存在：按字面路径判断 */ }
+  // 还原成真实路径，防止借链接绕过：要写的文件、文件夹可能还不存在，就从最深一层已存在的文件夹算起，再接上后面的部分
+  let dir = path.resolve(p);
+  const rest = [];
+  for (;;) {
+    try { dir = fs.realpathSync(dir); break; } catch { /* 这一层还不存在：往上找 */ }
+    const up = path.dirname(dir);
+    if (up === dir) break;
+    rest.unshift(path.basename(dir));
+    dir = up;
   }
+  const real = path.join(dir, ...rest);
   const inside = (dir, f) => !path.relative(dir, f).startsWith('..') && !path.isAbsolute(path.relative(dir, f));
   if (inside(path.resolve(HOME), real) || real.split(path.sep).some(s => SENSITIVE.test(s))) {
     throw Object.assign(new Error(`为了安全，不读写这个位置：${real}`), { exit: 2 });

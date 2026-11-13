@@ -372,7 +372,9 @@ test('上传、下载、截图、PDF、手机模式', async () => {
   fs.writeFileSync(path.join(HOME, 'secret.txt'), 'x');
   fs.mkdirSync(path.join(files, '.ssh'));
   fs.writeFileSync(path.join(files, '.ssh', 'id_rsa'), 'x');
+  fs.symlinkSync(HOME, path.join(files, 'link'), 'junction'); // 看着普通、其实指向 WebShell 数据目录的文件夹链接
   for (const args of [['upload', path.join(HOME, 'secret.txt')], ['upload', path.join(files, '.ssh', 'id_rsa')],
+    ['download', 'Get file', path.join(files, 'link', 'new', 'sub')], // 后面两层还不存在：也要还原出真实位置
     ['download', 'Get file', path.join(HOME, 'dl')], ['screenshot', path.join(files, '.ssh', 's.png')]]) {
     const r = await ws(...args);
     assert.equal(r.code, 2, args.join(' '));
