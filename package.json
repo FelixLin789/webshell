@@ -1,0 +1,9 @@
+{
+  "name": "webshell",
+  "version": "0.3.0",
+  "description": "让 AI 用命令行操控网页",
+  "license": "MIT",
+  "bin": { "ws": "webshell.mjs" },
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test" }
+}
