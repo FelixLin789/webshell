@@ -92,6 +92,14 @@ export function page() {
   const expansion = e => e.matches('details > summary:first-of-type')
     ? String(e.parentElement.open) : e.getAttribute('aria-expanded');
   const userLike = e => e.tagName === 'INPUT' && /^(text|email|tel)$/.test(e.type) && !card(e) && !otp(e);
+  // 表单里的分组标题（ls --form 用）：所在 fieldset 的 legend，没有就用它前面最近的一个标题。跟表单无关的元素是 null
+  // shortcut: shadow DOM、内嵌页面里的元素和外面的标题比不出先后，可能归错组；真遇到再按各自的根节点分别找
+  const groupOf = (e, heads) => {
+    if (!(isField(e) || /^(checkbox|radio|file)$/.test(kind(e)) || (form(e) && e.tagName !== 'A'))) return null;
+    const legend = e.closest('fieldset')?.querySelector(':scope > legend');
+    const head = legend ?? heads.filter(h => h.compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING).at(-1);
+    return head ? clean(head.innerText).slice(0, 80) : '';
+  };
 
   return {
     loc: () => `${document.title} — ${location.href}`,
@@ -105,8 +113,11 @@ export function page() {
       return [...new Set(deep(document, e => e.matches('a[href]') && shown(e) && re.test(label(e))
         && /^https?:$/.test(e.protocol) && !dead(e) && !clickStop(e)).map(e => e.href))];
     },
-    // 每个元素一行：[类型, 文字, 当前值或提示, 是不是输入框, 链接地址]；元素本身记在 window.__ws 里，供随后按编号操作
-    scan: () => (window.__ws = deep(document, listed)).map(e => [kind(e), label(e), more(e), isField(e), href(e)]),
+    // 每个元素一行：[类型, 文字, 当前值或提示, 是不是输入框, 链接地址, 表单分组]；元素本身记在 window.__ws 里，供随后按编号操作
+    scan: () => {
+      const heads = deep(document, h => /^H[1-6]$/.test(h.tagName) && shown(h));
+      return (window.__ws = deep(document, listed)).map(e => [kind(e), label(e), more(e), isField(e), href(e), groupOf(e, heads)]);
+    },
     cat: () => {
       const main = document.querySelectorAll('main,[role=main]'); // 有唯一的正文区就只读正文，省掉导航和页脚
       return text(main.length === 1 ? main[0] : document.body ?? document.documentElement);

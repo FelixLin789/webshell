@@ -163,7 +163,7 @@ const inner = sid => [...frames].filter(([, f]) => f.parent === sid).flatMap(([s
 async function snapshot(sid) {
   const groups = await Promise.all([sid, ...inner(sid)].map(async s => {
     const rows = await run(s, `${s === sid || SEEN} ? ${LIB}.scan() : []`).catch(() => []); // 正在加载或刚被关掉的内嵌页面就跳过
-    return rows.map(([kind, label, more, field, href], i) => ({ s, i, kind, label, more, field, href }));
+    return rows.map(([kind, label, more, field, href, group], i) => ({ s, i, kind, label, more, field, href, group }));
   }));
   refs = groups.flat();
   return refs;
@@ -401,6 +401,18 @@ export const cmds = {
   async ls(p, args) {
     const rows = await snapshot(p.sid), lines = rows.map(r => tail(r, args.includes('-l')));
     if (args.includes('--all')) return lines.map((line, i) => `${i + 1}\t${line}`).join('\n');
+    // 长表单：只列表单里的框和按钮，按小标题分组，同名的框（收货地址、账单地址里都有的“First name”）一眼分得清
+    if (args.includes('--form')) {
+      const out = [];
+      let last;
+      rows.forEach((r, i) => {
+        if (r.group == null) return;
+        if (r.group !== last) out.push(`## ${r.group || '（没有标题）'}`);
+        last = r.group;
+        out.push(`${i + 1}\t${lines[i]}`);
+      });
+      return out.join('\n') || '（这个页面上没有表单）';
+    }
     // 引用角标（[1]、[note 2]）和“Jump up”这类回跳链接只在本页内跳转，几乎用不着点，维基百科上却有好几百个：不列出
     // （只认这几种写法：网站用 href="#..." 做的标签页、折叠按钮照样列出）
     const keep = rows.flatMap((r, i) => (r.kind === 'link' && !r.href && /^(\[[^\]]{1,20}\]|\^|↑|jump up.*)$/i.test(r.label) ? [] : [i + 1]));

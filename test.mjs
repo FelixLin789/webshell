@@ -111,6 +111,11 @@ const server = http.createServer(async (req, res) => {
   else if (u.pathname === '/login') res.end(LOGIN);
   else if (u.pathname === '/login-echo') res.end(LOGIN + '<p id="echo"></p><script>document.querySelector("form").onsubmit = e => { e.preventDefault(); document.getElementById("echo").textContent = e.target.elements.pw.value; };</script>');
   else if (u.pathname === '/feed') res.end(FEED);
+  // 长表单：两组里都有“First name”
+  else if (u.pathname === '/order') res.end(`<title>Order</title><h1>Checkout</h1><a href="/about">Help</a><form>
+    <h2>Shipping address</h2><input placeholder="First name"><input placeholder="City">
+    <fieldset><legend>Billing address</legend><input placeholder="First name"><select aria-label="Country"><option>Canada</option><option>USA</option></select></fieldset>
+    <h2>Options</h2><label><input type="checkbox"> Gift wrap</label><button type="button">Continue</button></form>`);
   else if (u.pathname === '/expand') res.end(`<title>Expand</title><main><h2 hidden>Flights</h2>
     <button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true'); setTimeout(()=>document.querySelector('h2').hidden=false,300); fetch('/data').then(r=>r.text()).then(t=>this.nextElementSibling.textContent=t)">Flight details</button><p>Loading</p>
     <details><summary>Details</summary><p>Arrives at 12:30 AM+1</p></details>
@@ -277,6 +282,18 @@ test('省 token：动作之后只报告新出现的文字；同样的按钮在 l
   assert.deepEqual(all.filter(l => l.endsWith('\tbutton\tupvote')).map(l => l.split('\t')[0]), up[1].split(','));
   assert.match((await ws('click', up[1].split(',')[2])).out, /\n新出现：\nStory 2 voted 2$/); // 按合并行里的第 3 个编号点：点中的正是第 3 条
   assert.match((await ws('click', 'Go about')).out, /^About — [^\n]*$/); // 跳到了新页面：不附内容，要看就 cat
+});
+
+test('ls --form：长表单只列框和按钮，按小标题分组，同名的框分得清', async () => {
+  await ws('cd', `${base}/order`);
+  const form = (await ws('ls', '--form')).out;
+  assert.match(form, /^## Shipping address\n\d+\ttext\tFirst name\n\d+\ttext\tCity\n## Billing address\n(\d+)\ttext\tFirst name\n\d+\tselect\tCountry\tCanada\n## Options\n\d+\tcheckbox\tGift wrap\n\d+\tbutton\tContinue$/);
+  assert.doesNotMatch(form, /Help/); // 表单外面的链接不列
+  const billing = form.match(/## Billing address\n(\d+)/)[1];
+  await ws('type', billing, 'Ann'); // 按分组里看到的编号填，填进的正是账单地址那一个
+  assert.match((await ws('ls', '--form')).out, /## Billing address\n\d+\ttext\tFirst name\tAnn/);
+  await ws('cd', base);
+  assert.match((await ws('ls', '--form')).out, /^## /); // 别的页面照样能用
 });
 
 test('shadow DOM 和内嵌页面里的元素也能点、能填；scroll 能触发滚动加载', async () => {
