@@ -1,0 +1,17 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.FelixLin789/webshell",
+  "title": "WebShell",
+  "description": "Drive a real browser with shell-like text commands (cd/ls/cat/click/type), using far fewer tokens.",
+  "repository": { "url": "https://github.com/FelixLin789/webshell", "source": "github" },
+  "version": "0.3.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "webshell-mcp",
+      "version": "0.3.0",
+      "transport": { "type": "stdio" },
+      "packageArguments": [{ "type": "positional", "value": "mcp" }]
+    }
+  ]
+}

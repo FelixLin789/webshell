@@ -1,5 +1,62 @@
 # WebShell
 
+**Let AI agents drive a real browser with shell-like text commands, using a fraction of the tokens of snapshot- or screenshot-based tools.**
+
+`cd` into a site, `ls` what you can click or fill, `cat` the text, `click` / `type` by number. Output is plain text, kept short on purpose: repeated items are merged, long pages can be read section by section, and after a click or keystroke you get only the text that newly appeared, not the whole page again. It can drive your own Chrome with your existing logins, and it ships as a CLI and as an MCP server with a single tool.
+
+```
+$ ws cd github.com/microsoft/vscode
+GitHub - microsoft/vscode: Visual Studio Code · GitHub — https://github.com/microsoft/vscode
+$ ws ls | grep -w Code
+37	button	Code
+$ ws click 37
+GitHub - microsoft/vscode … — https://github.com/microsoft/vscode
+新出现：            ← "newly appeared": just the menu that opened
+Clone
+HTTPS
+GitHub CLI
+Download ZIP
+```
+
+### Tokens sent to the model (measured on public pages, Nov 2026)
+
+| Page / action | WebShell | agent-browser `snapshot -i` | Full accessibility snapshot (Playwright MCP style) |
+|---|---:|---:|---:|
+| GitHub repo page: list what can be clicked | ~1,200 | ~7,200 | ~10,900 |
+| Bootstrap docs page: list what can be clicked | ~500 | ~2,900 | ~11,700 |
+| Google Flights search page | ~600 | ~1,100 | ~2,400 |
+| After clicking GitHub's "Code" menu | **63** (only the new text) | ~7,200 (snapshot again) | — |
+| Wikipedia "Alan Turing": read two sections | **~2,600** (outline, then sections) | — | ~158,000 (Playwright MCP snapshot) |
+
+Counts are estimates (about 4 characters per token for English text); a screenshot costs roughly 1,000–2,000 tokens per image and cannot see anything off-screen.
+
+### Install
+
+Requires Node.js 22+ and Chrome. No dependencies.
+
+```bash
+git clone https://github.com/FelixLin789/webshell && cd webshell && npm link   # then `ws` works anywhere
+```
+
+As an MCP server (for example in Claude Code):
+
+```bash
+claude mcp add webshell -- node "/path/to/webshell/webshell.mjs" mcp
+```
+
+### Safety
+
+- The AI never sees passwords: `login` fills them from an encrypted local password book (Windows for now) that only you can edit.
+- Payment, purchase and authorization buttons, card fields and one-time codes are refused; those stay with you.
+- Uploads, downloads and screenshots refuse sensitive locations (WebShell's own data, dot-folders such as `.ssh`, browser profiles, autostart folders).
+- It never brings the browser to the front, so you can keep using your computer.
+
+The full documentation below is in Chinese. Run `ws` with no arguments for the command list.
+
+---
+
+## 中文说明
+
 让 AI 像用命令行一样操控网页：`cd` 进网站，`ls` 看能点、能填什么，`cat` 读内容。
 默认只给文字，省 token；跑在你自己的电脑上，可以直接用你自己的 Chrome 和里面的登录状态。
 
