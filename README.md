@@ -35,13 +35,19 @@ Counts are estimates (about 4 characters per token for English text); a screensh
 Requires Node.js 22+ and Chrome. No dependencies.
 
 ```bash
-git clone https://github.com/FelixLin789/webshell && cd webshell && npm link   # then `ws` works anywhere
+npm install -g webshell-mcp   # then `ws` works anywhere
 ```
 
-As an MCP server (for example in Claude Code):
+As an MCP server, for example in Claude Code:
 
 ```bash
-claude mcp add webshell -- node "/path/to/webshell/webshell.mjs" mcp
+claude mcp add webshell -- npx -y webshell-mcp mcp
+```
+
+Or in any MCP client's JSON config:
+
+```json
+{ "mcpServers": { "webshell": { "command": "npx", "args": ["-y", "webshell-mcp", "mcp"] } } }
 ```
 
 ### Safety
@@ -80,13 +86,13 @@ United Airlines bans AI agents from booking flights on behalf of travelers (cbsn
 
 ## 安装
 
-在这个文件夹里运行一次，之后在任何地方都能用 `ws`：
+从 npm 安装，之后在任何地方都能用 `ws`：
 
 ```bash
-npm link
+npm install -g webshell-mcp
 ```
 
-不想安装的话，把下面的 `ws` 换成 `node webshell.mjs` 也一样。
+也可以从源码装：克隆这个仓库，在文件夹里运行一次 `npm link`；或者不安装，把下面的 `ws` 换成 `node webshell.mjs`。
 
 ## 用你自己的 Chrome（推荐）
 
@@ -186,7 +192,7 @@ AI 从头到尾看不到你的密码：
 **MCP**：WebShell 自己就是一个 MCP 服务器，只有一个工具 `ws`，参数是一行命令。以 Claude Code 为例：
 
 ```bash
-claude mcp add webshell -- node "<WebShell 所在文件夹>/webshell.mjs" mcp
+claude mcp add webshell -- npx -y webshell-mcp mcp
 ```
 
 MCP 里自带 `| grep [-i] [-v] [-c] [-C 行数]` 和 `| head -N`，还能用分号一次做几步：`cd github.com; ls | grep -i login`。没加过滤器时，每条命令最多返回 200 行。`screenshot` 会把图片直接交给 AI。文件路径请写完整路径。更新了 WebShell 的代码之后，要重启用它的程序（比如 Claude Desktop）。
