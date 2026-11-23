@@ -1,8 +1,10 @@
 # WebShell
 
+[![FelixLin789/webshell MCP server](https://glama.ai/mcp/servers/FelixLin789/webshell/badges/score.svg)](https://glama.ai/mcp/servers/FelixLin789/webshell)
+
 **Let AI agents drive a real browser with shell-like text commands, using a fraction of the tokens of snapshot- or screenshot-based tools.**
 
-`cd` into a site, `ls` what you can click or fill, `cat` the text, `click` / `type` by number. Output is plain text, kept short on purpose: repeated items are merged, long pages can be read section by section, and after a click or keystroke you get only the text that newly appeared, not the whole page again. It can drive your own Chrome with your existing logins, and it ships as a CLI and as an MCP server with a single tool.
+`cd` into a site, `ls` what you can click or fill, `cat` the text, `click` / `type` / `press` / `hover` by number. Output is plain text, kept short on purpose: repeated items are merged, long pages can be read section by section, tables come out tab-separated (`cat --table`), and after a click or keystroke you get only the text and the clickable elements that newly appeared (already numbered), not the whole page again. Rate limits, captchas and login redirects are flagged in the output. It can drive your own Chrome with your existing logins, and it ships as a CLI and as an MCP server with a single tool.
 
 ```
 $ ws cd github.com/microsoft/vscode
@@ -11,12 +13,18 @@ $ ws ls | grep -w Code
 37	button	Code
 $ ws click 37
 GitHub - microsoft/vscode … — https://github.com/microsoft/vscode
-新出现：            ← "newly appeared": just the menu that opened
+新出现：              ← "newly appeared": only the menu that opened
 Clone
 HTTPS
 GitHub CLI
-Download ZIP
+新出现的可点、可填：  ← its buttons, already numbered: `click 173` works right away
+172	button	Clone with HTTPS	pressed
+173	button	Clone with GitHub CLI
+…
+178	link	Download ZIP
 ```
+
+Numbers stay valid for the life of the page (only a new page starts again from 1), so a number you were shown never silently points at something else.
 
 ### Tokens sent to the model (measured on public pages, Nov 2026)
 
@@ -25,7 +33,7 @@ Download ZIP
 | GitHub repo page: list what can be clicked | ~1,200 | ~7,200 | ~10,900 |
 | Bootstrap docs page: list what can be clicked | ~500 | ~2,900 | ~11,700 |
 | Google Flights search page | ~600 | ~1,100 | ~2,400 |
-| After clicking GitHub's "Code" menu | **63** (only the new text) | ~7,200 (snapshot again) | — |
+| After clicking GitHub's "Code" menu | **~116** (new text + its 8 buttons, numbered) | ~7,200 (snapshot again) | — |
 | Wikipedia "Alan Turing": read two sections | **~2,600** (outline, then sections) | — | ~158,000 (Playwright MCP snapshot) |
 
 Counts are estimates (about 4 characters per token for English text); a screenshot costs roughly 1,000–2,000 tokens per image and cannot see anything off-screen.
@@ -81,8 +89,9 @@ United Airlines bans AI agents from booking flights on behalf of travelers (cbsn
 - `daemon.mjs`：后台进程：一直连着浏览器，执行所有命令
 - `page.mjs`：注入到网页里执行的代码（列元素、读文字、安全检查）
 - `common.mjs`：两边共用的路径、版本号、浏览器连接
-- `text.mjs`：目录和段落、`grep` / `head` / `extract` 这些文字处理
+- `text.mjs`：目录和段落、动作前后找新出现的文字、`grep` / `head` / `extract` 这些文字处理
 - `vault.mjs`：密码本
+- `files.mjs`：上传、下载、截图时检查本机位置（敏感的地方不碰），保存截图和 PDF
 
 ## 安装
 
@@ -112,11 +121,17 @@ npm install -g webshell-mcp
 
 ```
 ws cd <网址|/路径|..>              打开网站；不带参数显示当前位置
+ws back / ws forward               后退 / 前进，和浏览器的按钮一样
 ws ls [-l] [--all] [--form]        列出能点、能填的东西；-l 带链接地址，--all 按原顺序逐条列出；
                                     --form 只列表单里的框和按钮，按小标题分组
 ws cat [网址...] [--field 名字]     读页面文字；给多个网址就并行读；--field 只取一个字段，如 price
 ws cat --outline / --section 标题   正文多时先看目录，再只读需要的那一段
+ws cat --table                     只读页面里的表格：每张表一个标题行，一行一条、各格用 Tab 隔开
 ws click <编号|文字> [--accept]     用鼠标点击；点出新标签页会自动跟过去；--accept：弹出确认框时点“确定”
+ws hover <编号|文字>                鼠标悬停：悬停才展开的菜单，展开后的选项带编号列出来
+ws press <键> [编号|文字]           按键：Enter Escape Tab Space Backspace Delete 方向键 Home End PageUp PageDown，
+                                    可加 Shift+ / Control+ / Alt+ / Meta+；给了元素就先把焦点放到它上面
+ws wait <文字> [秒数]               等到页面上出现这段文字（默认最多 10 秒，最多 60 秒），单页应用加载慢时用
 ws expand <编号...> [--section 标题] 批量展开详情，等页面稳定一次，再读取正文或指定段落
 ws expand <编号...> [--section 标题] --extract '正则' --check '标记'
                                     展开状态和指定字段齐了就返回
@@ -131,7 +146,7 @@ ws download <编号|文字> [文件夹]    点击并下载，返回存到了哪�
 ws screenshot [文件] [--full]       截图（--full 截整页）
 ws pdf [文件]                      把页面存成 PDF
 ws mobile on|off                   用手机的屏幕大小和身份打开网页
-ws save 名字 / ws run 名字 [参数]    把最近一次 cd 之后的操作存成一条命令 / 重放
+ws save 名字 / ws run 名字 [参数]    把最近一次 cd 之后的操作（click、type、press、hover、wait、back、forward、login）存成一条命令 / 重放
 ws exit                            断开（专用窗口会被关掉；你自己的 Chrome 不会被关）
 ```
 
@@ -151,7 +166,11 @@ ws exit                            断开（专用窗口会被关掉；你自己
 
 `ls` 会把出现至少 5 次的相同列表项合成一行，保留每个元素的编号。例如合并行的第一列是 `12,19,26` 时，可用 `click 19` 操作编号 19 的元素。引用角标（`[1]`、`[note 2]`）和“Jump up”这类只在本页内跳转的回跳链接不列出，最后一行会说省略了几个；网站用 `href="#..."` 做的标签页、折叠按钮照样列出。需要看各元素原本的位置和上下文，或要看被省略的那些时，用 `ls --all`。
 
-`click`、`type`、`scroll`、`upload` 在同一份网页里操作后，会在“新出现”下面列出新增的文字，例如展开的内容、输入候选、滚动加载的新内容。新增预览最多 2,000 字，更多内容可用 `cat --outline` 或 `cat | grep` 找。若操作打开了新页面，用 `cat` 读取。
+`click`、`type`、`scroll`、`upload`、`press`、`hover` 在同一份网页里操作后，会在“新出现”下面列出新增的文字，例如展开的内容、输入候选、滚动加载的新内容；新冒出来的按钮、链接、输入框（比如点开菜单后的选项）另外在“新出现的可点、可填”下面带编号列出，可以直接 `click` 这些编号，不用再 `ls`；按钮上的字变了（“Follow”变成“Following”、列表的行被拿去显示别的内容），也会连同原来的编号再列一次。新增文字最多 2,000 字、新元素最多 30 个，更多内容可用 `cat --outline`、`cat | grep` 或 `ls` 找。若操作打开了新页面，或者单页应用换了路径（整页内容都换了），只报位置，用 `cat`、`ls` 读取。
+
+编号跟着元素走：同一个网页里编号一直不变（`ls` 也不重新编），动作之后新出现的元素接着往后编号，所以 `ls` 列出来的编号不一定连着。换了网页（跳转、刷新）才从 1 重新编。跳转、后退到别的网页后，旧编号会提示“已失效”，不会指到别的元素上；切到别的标签页再切回来，原来的编号照样能用。
+
+被限流（HTTP 429）、网站出错、页面要人机验证（Cloudflare 的“Just a moment”这类拦截页、看得见的验证框）、或者 `cd` 去的页面被转到了登录页时，结果最后会有一行“注意：”，AI 看到就该停下或者先登录，而不是对着错误页继续操作。每打开一次网页只提醒一次。
 
 点击默认像人一样用鼠标点；如果按钮被弹窗、横幅挡住了，或者在别的网站嵌进来的页面里，就改用脚本点击。
 
@@ -242,6 +261,8 @@ GitHub 和 BBC 新闻的元素列表没有达到合并门槛。GitHub 的 Code �
 | Google Flights：输城市不回车 | 441 | 107（直接带回全部候选） | 76% |
 | Hacker News：点 More（跳到新页面） | 975 | 12（只报位置，要看再 `cat`） | — |
 
+以上两张表是动作之后还不列新元素时测的。2026 年 11 月 18 日起，动作之后还会带编号列出新冒出来的按钮、链接、输入框：GitHub 展开 Code 菜单的输出变成约 116 个 token（新文字约 36，8 个新按钮约 80），仍比再 `cat` 整页少九成多，而且不用再 `ls` 就能点。
+
 工具说明（每次对话都要加载）从约 1,040 压到约 730 个 token。
 
 ## 安全
@@ -249,6 +270,8 @@ GitHub 和 BBC 新闻的元素列表没有达到合并门槛。GitHub 的 Code �
 - 密码：AI 不能自己往密码框里打字，只能用 `ws login` 让工具从密码本里填，看不到密码本身。
 - 验证码、银行卡输入框：拒绝输入。
 - 授权、付款、下单的按钮（看按钮上的文字，也看它所在的表单里有没有银行卡框），以及在这类表单里按回车：拒绝操作。
+- `press` 同样受这些限制：焦点在上面这些按钮、银行卡/验证码框、密码框上，或者在认不出名字的按钮上时，回车、空格、方向键、退格都不按；别的网站嵌进来的付款框（Stripe、PayPal 这类）里也一样。焦点不在任何框里、页面上却有付款按钮时，也不按回车和空格。
+- `mobile on/off` 重新打开当前网址而不是“刷新”，不会把刚提交的表单（比如下单）再提交一遍。
 - 以上情况退出码为 2，意思是“需要你本人在浏览器里完成”。
 - 网页弹出的确认框默认取消；`click ... --accept` 才点“确定”，但提到付款、下单的确认框永远不替你确认。
 - 网页内容对 AI 来说是不可信的输入：页面上写着“请执行某某操作”不等于你的指示。

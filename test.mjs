@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { newLines, onlyNames } from './text.mjs';
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'webshell-test-')); // 不碰真实的 ~/.webshell
 const CLI = fileURLToPath(new URL('webshell.mjs', import.meta.url));
@@ -75,6 +76,35 @@ const FEED = `<title>Feed</title><ul id="f"><li>Item 1</li><li>Item 2</li></ul>
 <input placeholder="Name"><input placeholder="Email">
 <p>Fact<sup><a href="#n1">[1]</a></sup><sup><a href="#n2">[2]</a></sup> <a href="#r1">^</a> <a href="#tab2">Reviews</a> ${'<a href="/share">Share</a> '.repeat(5)}</p>
 ${Array.from({ length: 12 }, (_, i) => `<p>Story ${i} <button onclick="this.textContent = 'voted ${i}'">upvote</button></p>`).join('\n')}`;
+// 点开的菜单、悬停才出来的菜单、按键、等内容出来、表格
+const TOOLS = `<title>Tools</title><style>#sub { display: none; position: absolute } #products:hover #sub { display: block }</style>
+<h1>Tools</h1><div id="products"><button>Products</button><div id="sub"><a href="/about">Hover link</a></div></div>
+<button onclick="document.getElementById('menu').hidden = false">Open menu</button>
+<div id="menu" hidden><a href="/about">Menu about</a> <button onclick="this.textContent = 'Menu done'">Menu action</button>
+<button onclick="document.getElementById('menu').hidden = true">Hide menu</button></div>
+<button onclick="this.textContent = 'After clicked'">After menu</button>
+<input placeholder="Keys" onkeydown="document.getElementById('k').textContent = (event.shiftKey ? 'Shift+' : '') + event.key"><p id="k"></p>
+<button onclick="setTimeout(() => { document.getElementById('later').textContent = 'Ready now'; }, 1500)">Later</button><p id="later"></p>
+<table><caption>Prices</caption><tr><th>Item</th><th>Price</th></tr><tr><td>Tea</td><td>3</td></tr></table>
+<div role="table" aria-label="Stock"><div role="row"><span role="columnheader">Item</span> <span role="columnheader">Left</span></div>
+<div role="row"><span role="cell">Tea</span> <span role="cell">7</span></div></div>
+<table><caption>Spans</caption><tr><th>OS</th><th>Version</th><th>Year</th></tr>
+<tr><td rowspan="2">Linux</td><td>1.0</td><td>2020<sup class="reference">[1]</sup></td></tr><tr><td>2.0</td><td>2021</td></tr>
+<tr><td colspan="2">Windows 11</td><td>2022</td></tr></table>
+<table role="presentation"><tr><td>Layout</td><td>only</td></tr></table>
+<ul><li role="menuitem"><a href="/about">Docs link</a></li></ul> <a href="/limited-empty">Go limited</a>
+<button onclick="history.pushState({}, '', '/tools/next'); document.querySelector('h1').textContent = 'Next page'">Route</button>`;
+// 付款控件放在别的网站嵌进来的页面里（Stripe、PayPal 都这样），还有认不出名字的按钮；?focus：内嵌页面自己把焦点放到付款按钮上
+const PAYFRAME = q => `<title>Pay frame</title><input placeholder="Before"><x-closed></x-closed>
+<iframe src="/xpay${q}" width="400" height="160"></iframe>
+${q ? '' : '<form action="/search"><input name="gift" placeholder="Gift note"><input type="image" alt="Buy now" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></form>'}
+<script>customElements.define('x-closed', class extends HTMLElement { connectedCallback() {
+  this.attachShadow({ mode: 'closed' }).innerHTML = '<button onclick="document.title = \\'PAID\\'">Pay now</button>'; } });</script>`;
+const PAYBOX = q => `<button onclick="this.textContent = 'Frame paid'">Pay frame</button>
+<form onsubmit="event.preventDefault(); this.querySelector('p').textContent = 'Frame submitted'">
+<input autocomplete="cc-number" placeholder="Frame card"><button>Frame submit</button><p></p></form>
+${q ? '<script>document.querySelector("button").focus()</script>' : ''}`;
+let posts = 0; // 表单被提交了几次（手机模式切换不能把它再提交一遍）
 const body = req => new Promise(r => { let b = ''; req.on('data', d => { b += d; }).on('end', () => r(b)); });
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
@@ -111,6 +141,18 @@ const server = http.createServer(async (req, res) => {
   else if (u.pathname === '/login') res.end(LOGIN);
   else if (u.pathname === '/login-echo') res.end(LOGIN + '<p id="echo"></p><script>document.querySelector("form").onsubmit = e => { e.preventDefault(); document.getElementById("echo").textContent = e.target.elements.pw.value; };</script>');
   else if (u.pathname === '/feed') res.end(FEED);
+  else if (u.pathname.startsWith('/tools')) res.end(TOOLS);
+  else if (u.pathname === '/payframe') res.end(PAYFRAME(u.search));
+  else if (u.pathname === '/xpay') res.writeHead(302, { location: `http://localhost:${server.address().port}/paybox${u.search}` }).end();
+  else if (u.pathname === '/paybox') res.end(PAYBOX(u.search));
+  else if (u.pathname === '/count-form') res.end('<title>Count</title><form method="post" action="/counted"><button>Submit</button></form>');
+  else if (u.pathname === '/counted') { if (req.method === 'POST') posts++; res.end(`<title>Counted</title><p>posts=${posts}</p>`); }
+  else if (u.pathname === '/wiki/CAPTCHA') res.end('<title>CAPTCHA - Wikipedia</title><p>A CAPTCHA is a test</p>'); // 只是提到 captcha 的普通页面
+  else if (u.pathname === '/limited') res.writeHead(429).end('<title>Slow down</title><p>Too many requests</p>');
+  else if (u.pathname === '/limited-empty') res.writeHead(429).end(); // 很多网站限流时什么也不返回
+  else if (u.pathname === '/gone') res.writeHead(404).end('<title>Gone</title><p>No such page</p>');
+  else if (u.pathname === '/challenge') res.end('<title>Just a moment...</title><p>Checking your browser</p>');
+  else if (u.pathname === '/private') res.writeHead(302, { location: '/login' }).end();
   // 长表单：两组里都有“First name”
   else if (u.pathname === '/order') res.end(`<title>Order</title><h1>Checkout</h1><a href="/about">Help</a><form>
     <h2>Shipping address</h2><input placeholder="First name"><input placeholder="City">
@@ -229,6 +271,11 @@ test('新标签页：点出来自动跟过去，tab 列出 / 切换 / 关闭', a
   assert.match((await ws('click', 'Sign in popup')).out, /新标签页.*\nOAuth — /);
   assert.match((await ws('click', 'Continue')).out, /已关闭.*\nShop — /);
   assert.match((await ws('cd')).out, /^Shop — /);
+  // 按键点出的新标签页也跟过去；切回来后，之前给出的编号照样指向原来的元素
+  const pressMe = (await ws('ls')).out.match(/^(\d+)\tbutton\tPress me$/m)[1];
+  assert.match((await ws('press', 'Enter', 'Open popup')).out, /新标签页.*\nAbout — /);
+  await ws('tab', 'close');
+  assert.match((await ws('click', pressMe)).out, new RegExp(`\\n${pressMe}\\tbutton\\tClicked$`));
 });
 
 test('expand 批量展开、等待异步内容并复用提取校验', async () => {
@@ -280,8 +327,92 @@ test('省 token：动作之后只报告新出现的文字；同样的按钮在 l
   assert.equal(ls.match(/upvote/g).length, 1);
   const all = (await ws('ls', '--all')).out.split('\n');
   assert.deepEqual(all.filter(l => l.endsWith('\tbutton\tupvote')).map(l => l.split('\t')[0]), up[1].split(','));
-  assert.match((await ws('click', up[1].split(',')[2])).out, /\n新出现：\nStory 2 voted 2$/); // 按合并行里的第 3 个编号点：点中的正是第 3 条
+  const third = up[1].split(',')[2]; // 按合并行里的第 3 个编号点：点中的正是第 3 条，按钮上的字变了就连同编号再列一次
+  assert.match((await ws('click', third)).out, new RegExp(`\\n新出现：\\nStory 2 voted 2\\n新出现的可点、可填：\\n${third}\\tbutton\\tvoted 2$`));
   assert.match((await ws('click', 'Go about')).out, /^About — [^\n]*$/); // 跳到了新页面：不附内容，要看就 cat
+});
+
+test('动作之后新出现的元素带编号；同一个网页里编号不变（ls 也不重编），旧编号不会被插进来的元素挤错位', async () => {
+  await ws('cd', `${base}/tools`);
+  const after = (await ws('ls')).out.match(/^(\d+)\tbutton\tAfter menu$/m)[1];
+  const opened = (await ws('click', 'Open menu')).out;
+  // 只列新元素：只是这些按钮上的字的那行、被菜单拆开的“Open menu After menu”那行都不算新文字
+  const [, link, action, hide] = opened.match(
+    /^Tools — [^\n]*\n新出现的可点、可填：\n(\d+)\tlink\tMenu about\n(\d+)\tbutton\tMenu action\n(\d+)\tbutton\tHide menu$/) ?? [];
+  assert.ok(link, opened);
+  assert.ok(+link > +after); // 新元素接在后面编号
+  // 菜单插在它前面了，旧编号照样是它；按钮上的字变了，就连同原来的编号再列一次
+  assert.match((await ws('click', after)).out, new RegExp(`^Tools — [^\\n]*\\n新出现的可点、可填：\\n${after}\\tbutton\\tAfter clicked$`));
+  assert.match((await ws('click', action)).out, // 新给的编号直接能用
+    new RegExp(`\\n新出现：\\nMenu about Menu done Hide menu\\n新出现的可点、可填：\\n${action}\\tbutton\\tMenu done$`));
+  const again = (await ws('ls')).out; // 同一个网页里 ls 也不重新编号：之前给出的编号都还对得上
+  assert.match(again, new RegExp(`^${after}\\tbutton\\tAfter clicked$`, 'm'));
+  assert.match(again, new RegExp(`^${action}\\tbutton\\tMenu done$`, 'm'));
+  assert.equal(again.match(/Docs link/g).length, 1); // li[role=menuitem] 包着的同名链接只列一次
+  assert.equal((await ws('click', hide)).out, `Tools — ${base}/tools`); // 收起菜单后两边的字拼回一行，也不算新内容
+  assert.match((await ws('hover', 'Products')).out, /^Tools — [^\n]*\n新出现的可点、可填：\n\d+\tlink\tHover link$/); // CSS 的悬停菜单
+  assert.match((await ws('press', 'Shift+Tab', 'Keys')).out, /\n新出现：\nShift\+Tab$/);
+  assert.match((await ws('press', 'esc', 'Keys')).out, /\n新出现：\nEscape$/);
+  assert.match((await ws('press', 'Tab')).out, /\n新出现：\nTab$/); // 不给元素：按在当前焦点上
+  assert.match((await ws('press', 'F13')).err, /不认识“F13”/);
+  await ws('click', 'Later');
+  assert.match((await ws('wait', 'ready NOW', '5')).out, /^Tools — [^\n]*\n找到：\nReady now$/);
+  assert.match((await ws('wait', 'Never', '1')).err, /等了 1 秒，页面上还没有出现“Never”/);
+  // 合并的格子摊到每一格、脚注角标去掉、只是排版的表不算
+  const spans = '## 表格 3：Spans（4 行 × 3 列）\nOS\tVersion\tYear\nLinux\t1.0\t2020\nLinux\t2.0\t2021\nWindows 11\tWindows 11\t2022';
+  assert.equal((await ws('cat', '--table')).out,
+    `## 表格 1：Prices（2 行 × 2 列）\nItem\tPrice\nTea\t3\n## 表格 2：Stock（2 行 × 2 列）\nItem\tLeft\nTea\t7\n${spans}`);
+  assert.equal((await ws('cat', '--table', '--outline')).out,
+    '## 表格 1：Prices（2 行 × 2 列）\t(2 行)\n## 表格 2：Stock（2 行 × 2 列）\t(2 行)\n## 表格 3：Spans（4 行 × 3 列）\t(4 行)');
+  assert.equal((await ws('cat', '--table', '--section', '表格 2')).out, '## 表格 2：Stock（2 行 × 2 列）\nItem\tLeft\nTea\t7');
+  assert.match((await ws('cat', `${base}/about`, '--table')).out, /没有表格/);
+  // 单页应用换了路径（整页内容都换了）：像跳到新网页一样只报位置
+  assert.equal((await ws('click', 'Route')).out, `Tools — ${base}/tools/next`);
+  // 后退 / 前进；别的网页上给的编号在这一页报失效，不会点到这一页的元素上
+  await ws('cd', `${base}/order`);
+  const cont = (await ws('ls')).out.match(/^(\d+)\tbutton\tContinue$/m)[1];
+  assert.match((await ws('back')).out, /^Tools — /);
+  assert.match((await ws('click', cont)).err, /编号已失效/);
+  assert.match((await ws('forward')).out, /^Order — /);
+  assert.match((await ws('forward')).err, /最新的一页/);
+});
+
+test('按键也拦得住：跨站内嵌页面里的付款按钮和银行卡框、认不出名字的按钮、焦点不在框里时', async () => {
+  await ws('cd', `${base}/payframe`);
+  const ls = (await ws('ls')).out;
+  assert.match(ls, /\tbutton\tPay frame\t（需本人点击）$/m); // 内嵌页面里的也标出来了
+  assert.match(ls, /\tbutton\tBuy now\t（需本人点击）$/m); // 图片按钮用 alt 当名字
+  for (const args of [['press', 'Enter', 'Pay frame'], ['press', 'Space', 'Pay frame'], ['press', 'Enter', 'Frame card'],
+    ['press', 'Control+Enter', 'Frame card'], ['press', 'ArrowDown', 'Frame card'], ['press', 'Enter', 'Gift note'],
+    ['type', 'Gift note', 'x', '--enter']]) {
+    const r = await ws(...args);
+    assert.equal(r.code, 2, args.join(' '));
+    assert.match(r.err, /本人/);
+  }
+  await ws('press', 'Tab', 'Before'); // 焦点移到 closed shadow DOM 里的按钮上：看不到它叫什么
+  assert.equal((await ws('press', 'Enter')).code, 2);
+  await ws('cd', `${base}/payframe?focus`); // 内嵌页面自己把焦点放到了付款按钮上，主页面上没有别的付款按钮
+  assert.equal((await ws('press', 'Enter')).code, 2);
+  assert.equal((await ws('press', 'Space')).code, 2);
+  assert.doesNotMatch((await ws('cat')).out, /Frame paid|Frame submitted/);
+  assert.match((await ws('cd')).out, /^Pay frame — /); // closed shadow DOM 里的按钮也没被按下（按下会把标题改成 PAID）
+});
+
+test('被限流、出错、要人机验证、被转到登录页：结果最后有一行“注意：”', async () => {
+  assert.match((await ws('cd', `${base}/limited`)).out, /^Slow down — [^\n]*\n注意：被限流了（HTTP 429）/);
+  const empty = await ws('cd', `${base}/limited-empty`);
+  assert.match(empty.out + empty.err, /被限流了/);
+  assert.match((await ws('forward')).err, /打不开 .*\/limited-empty/); // 往前走到上次打不开的那一页：退回来并报错
+  assert.match((await ws('cd')).out, /^Slow down — /);
+  assert.match((await ws('cd', `${base}/gone`)).out, /\n注意：服务器返回 HTTP 404（页面可能不存在）$/);
+  assert.doesNotMatch((await ws('press', 'Tab')).out, /注意/); // 每打开一次网页只提醒一次
+  await ws('cd', `${base}/tools`);
+  assert.match((await ws('click', 'Go limited')).out, /\n注意：被限流了（HTTP 429）/); // 点链接到了什么都不返回的限流页
+  assert.match((await ws('cd', `${base}/challenge`)).out, /\n注意：页面可能要求人机验证/);
+  assert.doesNotMatch((await ws('cd', `${base}/wiki/CAPTCHA`)).out, /注意/); // 只是标题里提到 captcha 的普通页面
+  assert.match((await ws('cd', `${base}/private`)).out, /^Login — [^\n]*\n注意：跳到了登录页/);
+  assert.doesNotMatch((await ws('cd', `${base}/login`)).out, /注意/); // 本来就是要去登录页
+  assert.doesNotMatch((await ws('cd', `${base}/about`)).out, /注意/);
 });
 
 test('ls --form：长表单只列框和按钮，按小标题分组，同名的框分得清', async () => {
@@ -339,10 +470,15 @@ test('登录可以自动，银行卡、授权和付款只能本人操作', async
   await ws('cd', base);
   assert.equal((await ws('click', 'Log in')).code, 0);
   assert.match((await ws('type', 'Password', 'secret')).err, /请用 login/); // 密码只能由 login 从密码本里填
+  assert.match((await ws('press', 'Enter', 'Locked')).err, /拿不到焦点/); // 焦点进不去：不把键按到别处
+  assert.match((await ws('press', 'Enter', 'Search')).out, /^Results — /); // 普通表单回车照样提交
+  await ws('cd', base);
   const blocked = [['click', 'Place order'], ['type', 'Note', 'hi', '--enter'],
     ['type', 'Memo', 'x', '--enter'], // 付款按钮用 form= 关联在表单外面，回车照样会提交
     ['type', 'Card number', '4111'], ['click', 'Continue'], // 银行卡表单里的任何按钮
-    ['click', 'Allow']]; // 授权第三方访问账号
+    ['click', 'Allow'], // 授权第三方访问账号
+    ['press', 'Enter', 'Card number'], ['press', 'Enter', 'Note'], ['press', 'Space', 'Place order'], // 按键也不能绕过去
+    ['press', 'Backspace', 'Password']]; // 密码框只能由 login 填，按键改它也不行
   for (const args of blocked) {
     const r = await ws(...args);
     assert.equal(r.code, 2, args.join(' '));
@@ -415,6 +551,13 @@ test('上传、下载、截图、PDF、手机模式', async () => {
   assert.equal((await ws('cat')).out, 'phone 390');
   await ws('mobile', 'off');
   assert.match((await ws('cat')).out, /^desktop (?!390$)\d+$/);
+  // 提交表单后打开的页面：切换手机模式时不能把表单再提交一遍（比如重复下单）
+  await ws('cd', '/count-form');
+  await ws('click', 'Submit');
+  const sent = posts;
+  await ws('mobile', 'on');
+  await ws('mobile', 'off');
+  assert.equal(posts, sent);
 });
 
 test('cat --outline / --section 和 grep -C：只读需要的部分，内容与原文一字不差', async () => {
@@ -483,6 +626,30 @@ test('save / run：把流程存成一条命令', async () => {
   await ws('cd', `${base}/search?q=1`);
   assert.match((await ws('run', 'about')).out, /^About — /);
   assert.equal((await ws('save', '../x')).code, 1); // 流程名不能带路径
+  // 名字不唯一的按钮存成编号：重放时先编一遍号，点中的还是录的时候那一个
+  await ws('cd', `${base}/feed`);
+  const third = (await ws('ls')).out.match(/^((?:\d+,){11}\d+)\tbutton\tupvote$/m)[1].split(',')[2];
+  await ws('click', third);
+  await ws('save', 'vote');
+  await ws('cd', base);
+  assert.match((await ws('run', 'vote')).out, /voted 2/);
+  // 按键、悬停也录进去
+  await ws('cd', `${base}/tools`);
+  await ws('press', 'esc', 'Keys');
+  await ws('save', 'keys');
+  await ws('cd', base);
+  assert.match((await ws('run', 'keys')).out, /\n新出现：\nEscape$/);
+});
+
+test('newLines / onlyNames：只报真正新出现的行', () => {
+  assert.deepEqual(newLines(['a', 'Open menu After menu'], ['a', 'Open menu', 'Menu about', 'After menu']), ['Menu about']); // 被插进来的块拆开的行
+  assert.deepEqual(newLines(['Open menu', 'x', 'After menu'], ['Open menu After menu']), []); // 收起后拼回一行
+  assert.deepEqual(newLines(['1', '5'], ['15']), ['15']); // 新的数字不能算成旧的两段拼起来的
+  assert.deepEqual(newLines(['Item 1'], ['Item 1', 'Item 1']), ['Item 1']); // 重复的行按次数算
+  assert.ok(onlyNames('## Settings', ['Settings'])); // 标题前的 # 不算
+  assert.ok(onlyNames('Save · Cancel', ['Cancel', 'Save']));
+  assert.ok(!onlyNames('15', ['1', '5']));
+  assert.ok(!onlyNames('Saved 3 items', ['Save']));
 });
 
 test('WS_CDP：连到别处已经开着的浏览器（比如云端浏览器），退出时不关它', async () => {

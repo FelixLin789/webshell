@@ -1,6 +1,6 @@
 {
   "name": "webshell-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Let AI agents drive a real browser with shell-like text commands (cd / ls / cat / click / type) using far fewer tokens. CLI + MCP server, zero dependencies. 让 AI 用命令行操控网页",
   "mcpName": "io.github.FelixLin789/webshell",
   "license": "MIT",
@@ -10,7 +10,7 @@
   "bugs": { "url": "https://github.com/FelixLin789/webshell/issues" },
   "keywords": ["mcp", "mcp-server", "ai-agent", "browser-automation", "chrome", "cdp", "cli", "llm", "claude", "tokens"],
   "bin": { "ws": "webshell.mjs", "webshell-mcp": "webshell.mjs" },
-  "files": ["webshell.mjs", "daemon.mjs", "common.mjs", "text.mjs", "page.mjs", "vault.mjs"],
+  "files": ["webshell.mjs", "daemon.mjs", "common.mjs", "text.mjs", "page.mjs", "vault.mjs", "files.mjs"],
   "engines": { "node": ">=22" },
   "scripts": { "test": "node --test" }
 }

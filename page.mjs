@@ -44,7 +44,7 @@ export function page() {
     const cached = labels.get(e);
     if (cached !== undefined) return cached;
     const name = clean(e.getAttribute('aria-label') || named(e) || e.labels?.[0]?.innerText
-      || (isField(e) ? e.placeholder || e.name || e.id : e.innerText || text(e) || e.value || e.title || hint(e))).slice(0, 80);
+      || (isField(e) ? e.placeholder || e.name || e.id : e.innerText || text(e) || e.value || e.title || e.alt || hint(e))).slice(0, 80);
     labels.set(e, name);
     return name;
   };
@@ -61,7 +61,8 @@ export function page() {
   const humanOnly = e => notField(e) && /\b(authori[sz]e|allow|pay|buy now|purchase|place (your )?order|submit order|confirm (order|payment|purchase))\b|授权|允许|付款|支付|下单|购买|提交订单|确认订单/i.test(label(e));
   // 所在表单（包括用 form= 关联到表单、但放在表单外面的按钮）里有没有某种框
   const form = e => e.form ?? e.closest('form');
-  const inForm = (e, test) => [...(form(e)?.elements ?? [])].some(test);
+  // （form.elements 照规范偏偏不含图片按钮 <input type=image>，PayPal 的“Buy Now”就是这种：另外补上）
+  const inForm = (e, test) => { const f = form(e); return !!f && [...f.elements, ...f.querySelectorAll('input[type=image]')].some(test); };
   const dead = a => /^(#|javascript:)/i.test(a.getAttribute('href')); // href 只是摆设、实际靠脚本响应的链接
 
   // 把整棵树走一遍，穿过 shadow DOM 和同源的内嵌页面（跨站的内嵌页面由本机那边另外连接）
@@ -74,8 +75,11 @@ export function page() {
     return out;
   };
   const shown = e => e.checkVisibility({ visibilityProperty: true }) && e.getClientRects().length;
+  // 只因 ARIA 角色才算可点、里面又包着同名链接或按钮的外壳（菜单项 li[role=menuitem] > a）：只列里面那个，不重复
+  const shell = e => !e.matches('a[href],button,input,select,textarea,summary,[onclick],[contenteditable=""],[contenteditable=true]')
+    && [...e.querySelectorAll('a[href],button')].some(x => label(x) === label(e));
   // 没有文字的按钮和链接，调用者看不出是什么，列出来只是白占字数
-  const listed = e => e.matches(SEL) && shown(e) && (isField(e) || label(e));
+  const listed = e => e.matches(SEL) && shown(e) && (isField(e) || label(e)) && !shell(e);
   // 勾选、选中、展开、按下、不可用这些状态直接列出来，AI 不必点一下才知道
   const state = e => ['checked', 'selected', 'expanded', 'pressed', 'disabled']
     .filter(a => e[a] === true || e.getAttribute(`aria-${a}`) === 'true').join(' ');
@@ -83,10 +87,33 @@ export function page() {
     : humanOnly(e) || (notField(e) && inForm(e, card)) ? '（需本人点击）'
     : isField(e) ? clean(e.tagName === 'SELECT' ? e.selectedOptions[0]?.text : e.value ?? e.innerText).slice(0, 80) : state(e));
   const href = e => (e.tagName !== 'A' || dead(e) ? '' : (e.origin === location.origin ? e.pathname + e.search + e.hash : e.href).slice(0, 100));
-  const at = i => {
-    const e = window.__ws?.[i];
-    if (!e?.isConnected) throw new Error('编号已失效，请重新运行 ls');
+  // 编号背后的记号是“这个网页打开的时刻/在 window.__ws 里的位置”：跳转、后退到别的网页后，旧编号只会报失效，不会指到别的网页的元素上
+  const at = h => {
+    const [doc, i] = String(h).split('/');
+    const e = doc === String(performance.timeOrigin) ? window.__ws?.[i] : null;
+    if (!e?.isConnected || !e.ownerDocument.defaultView) throw new Error('编号已失效，请重新运行 ls'); // 同源内嵌页面换了网页，旧元素也作废
     return e;
+  };
+  // 焦点真正所在的元素：穿过 shadow DOM 和同源的内嵌页面（跨站的内嵌页面里看不到，停在那个 iframe 上）
+  const focused = () => {
+    let e = document.activeElement;
+    for (let inner; (inner = e?.shadowRoot?.activeElement ?? e?.contentDocument?.activeElement);) e = inner;
+    return e;
+  };
+  // 元素中心在整个标签页里的坐标；被挡住、或在跨站内嵌页面里算不出时给 null（这时只能用脚本模拟）
+  const spot = e => {
+    e.scrollIntoView({ block: 'center', inline: 'center' });
+    const r = e.getBoundingClientRect();
+    let x = r.left + r.width / 2, y = r.top + r.height / 2, w = e.ownerDocument.defaultView, outer = null;
+    const free = (root, el) => { const hit = root.elementFromPoint?.(x, y); return hit && (hit === el || el.contains(hit)); };
+    if (!free(e.getRootNode(), e)) return null;
+    for (; w.frameElement; w = w.parent) { // 同源内嵌页面里的坐标，要加上内嵌框在外层页面里的位置
+      const f = w.frameElement.getBoundingClientRect();
+      x += f.left + w.frameElement.clientLeft;
+      y += f.top + w.frameElement.clientTop;
+      outer = w.frameElement;
+    }
+    return w === w.top && (!outer || free(w.document, outer)) ? { x, y } : null;
   };
   const clickStop = e => (humanOnly(e) || inForm(e, card)) && `“${label(e)}”是授权/付款/下单类按钮`;
   const expansion = e => e.matches('details > summary:first-of-type')
@@ -113,10 +140,15 @@ export function page() {
       return [...new Set(deep(document, e => e.matches('a[href]') && shown(e) && re.test(label(e))
         && /^https?:$/.test(e.protocol) && !dead(e) && !clickStop(e)).map(e => e.href))];
     },
-    // 每个元素一行：[类型, 文字, 当前值或提示, 是不是输入框, 链接地址, 表单分组]；元素本身记在 window.__ws 里，供随后按编号操作
+    // 返回 [这个网页的打开时刻, 每个元素一行：[记号, 类型, 文字, 当前值或提示, 是不是输入框, 链接地址, 表单分组, 是不是上次 mark 之后新冒出来的]]。
+    // 元素本身记在 window.__ws 里供随后按编号操作：同一个网页里记下的位置一直不变，新元素接在后面
     scan: () => {
       const heads = deep(document, h => /^H[1-6]$/.test(h.tagName) && shown(h));
-      return (window.__ws = deep(document, listed)).map(e => [kind(e), label(e), more(e), isField(e), href(e), groupOf(e, heads)]);
+      const ws = (window.__ws ??= []), doc = String(performance.timeOrigin);
+      ws.forEach((e, k) => { if (e && !(e.isConnected && e.ownerDocument.defaultView)) ws[k] = null; }); // 已经不在页面上的放掉，位置留着
+      const pos = new Map(ws.map((e, k) => [e, k]));
+      return [doc, deep(document, listed).map(e => [`${doc}/${pos.get(e) ?? ws.push(e) - 1}`, kind(e), label(e), more(e),
+        isField(e), href(e), groupOf(e, heads), !!window.__old && !window.__old.has(e)])];
     },
     cat: () => {
       const main = document.querySelectorAll('main,[role=main]'); // 有唯一的正文区就只读正文，省掉导航和页脚
@@ -151,22 +183,83 @@ export function page() {
       const stop = clickStop(e);
       if (stop) return { stop };
       if (e.target === '_blank') e.target = '_self'; // 留在当前标签页，不然“当前目录”就跟丢了
-      e.scrollIntoView({ block: 'center', inline: 'center' });
-      const r = e.getBoundingClientRect();
-      let x = r.left + r.width / 2, y = r.top + r.height / 2, w = e.ownerDocument.defaultView, outer = null;
-      const free = (root, el) => { const hit = root.elementFromPoint?.(x, y); return hit && (hit === el || el.contains(hit)); };
-      if (free(e.getRootNode(), e)) {
-        for (; w.frameElement; w = w.parent) { // 同源内嵌页面里的坐标，要加上内嵌框在外层页面里的位置
-          const f = w.frameElement.getBoundingClientRect();
-          x += f.left + w.frameElement.clientLeft;
-          y += f.top + w.frameElement.clientTop;
-          outer = w.frameElement;
-        }
-        // 算得出整个标签页里的坐标、那里也没被挡住，就像人一样用鼠标点（有些网站只认真实的点击）
-        if (w === w.top && (!outer || free(w.document, outer))) return { x, y };
-      }
+      const p = spot(e);
+      if (p) return p; // 算得出整个标签页里的坐标、那里也没被挡住，就像人一样用鼠标点（有些网站只认真实的点击）
       e.click(); // 被弹窗、横幅挡住了，或者在跨站的内嵌页面里：退回脚本点击
       return {};
+    },
+    // 悬停：能用真鼠标就用（CSS 的 :hover 菜单只认真鼠标），算不出坐标就发脚本事件（只对网页脚本写的菜单有用）
+    hover: i => {
+      const e = at(i);
+      const p = spot(e);
+      if (p) return p;
+      for (const t of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter']) {
+        e.dispatchEvent(new (t.startsWith('pointer') ? PointerEvent : MouseEvent)(t, { bubbles: !t.endsWith('enter') }));
+      }
+      return {};
+    },
+    mark: () => { window.__old = new WeakSet(deep(document, listed)); }, // 动作之前记下已有的元素，动作之后据此找出新冒出来的
+    focusAt: i => {
+      const e = at(i);
+      e.scrollIntoView({ block: 'center' });
+      e.focus();
+      // 焦点没过去就停下：不然键会按在原来有焦点的那个元素上（比如回车提交了别的表单）
+      if (e.getRootNode().activeElement !== e) throw new Error(`“${label(e)}”拿不到焦点，没法对它按键（可以改用 click）`);
+    },
+    // 按键之前查焦点所在的元素：回车、空格等于点按钮或提交表单，方向键、退格会改单选框、下拉框和输入框。
+    // 不看 document.hasFocus()：跨站内嵌页面里它常是 false，焦点却实实在在落在付款按钮上（查严一点只会多拒绝几次）
+    keyStop: (key, main) => {
+      const e = focused(), activating = key === 'Enter' || key === ' ';
+      if (!e || e === e.ownerDocument.body || e === e.ownerDocument.documentElement) {
+        // 焦点不在任何元素上时，网页可能把回车、空格当成点它的主按钮（有的确认框就这样）：主页面上看得见付款、授权按钮就不按
+        return activating && main && deep(document, x => notField(x) && shown(x) && humanOnly(x)).length
+          ? '焦点不在任何元素上，页面上却有付款/授权/下单类按钮（网页可能把这个键当成点它）' : '';
+      }
+      if (/^(IFRAME|FRAME)$/.test(e.tagName) || /^(Tab|Escape)$/.test(key)) return ''; // 焦点在跨站内嵌页面里：由那个页面自己查
+      const what = `焦点所在的“${label(e) || e.tagName.toLowerCase()}”`;
+      if (card(e) || otp(e)) return `${what}是银行卡/验证码输入框`;
+      if (pw(e)) return `${what}是密码框（只能用 login 填）`;
+      if (notField(e) && (clickStop(e) || (activating && !label(e)))) return `${what}是付款/授权/下单类按钮，或认不出是什么按钮`;
+      return activating && inForm(e, x => card(x) || humanOnly(x)) ? `${what}所在的表单有付款/授权/下单按钮或银行卡框` : '';
+    },
+    // 人机验证、拦截页（Cloudflare 的“Just a moment”、Google 的 /sorry/）：整个标题就是拦截页的样子、固定的拦截网址，或看得见的验证框。
+    // 只是标题里提到 captcha 的普通页面（维基百科的 CAPTCHA 词条）不算
+    blocked: () => {
+      if (/^(just a moment|attention required!?( \| cloudflare)?|access denied|one more step|are you a robot\??|verify(ing)? (that )?you are (a )?human|请稍候|人机验证|安全验证)\W*$/i
+        .test(document.title.trim()) || /^\/(sorry\/|cdn-cgi\/challenge-platform\/)/.test(location.pathname)) {
+        return '页面可能要求人机验证或拦截了访问：需要你本人在浏览器里看一下';
+      }
+      const box = [...document.querySelectorAll('iframe[src*="recaptcha"],iframe[src*="hcaptcha"],iframe[src*="challenges.cloudflare.com"]')]
+        .find(f => shown(f) && f.offsetHeight > 40 && !/invisible/.test(f.src)); // 隐形的 reCAPTCHA 很多普通网站都挂着，不算
+      return box ? '页面上有人机验证：需要你本人在浏览器里完成' : '';
+    },
+    // 网页里的表格（<table>，以及 role="table"/"grid"）：[标题, 每行各格的文字]。里面还套着表格的大表、标明只是排版的表（role=presentation）不算
+    tables: () => {
+      const heads = deep(document, h => /^H[1-6]$/.test(h.tagName) && shown(h));
+      const isTable = e => (e.tagName === 'TABLE' && !/^(presentation|none)$/.test(e.getAttribute('role') ?? ''))
+        || /^(table|grid|treegrid)$/.test(e.getAttribute('role'));
+      // 格子里的文字，去掉维基百科那种脚注角标 [1]
+      const cell = c => clean([...c.querySelectorAll('sup.reference')].reduce((t, s) => t.replace(s.innerText, ''), c.innerText));
+      // 合并的格子（rowspan / colspan）摊到它占的每一格里，各列才对得上表头
+      const grid = rows => {
+        const out = rows.map(() => []);
+        rows.forEach((r, y) => {
+          let x = 0;
+          for (const c of r.cells ?? r.querySelectorAll('[role=cell],[role=gridcell],[role=columnheader],[role=rowheader]')) {
+            while (out[y][x] !== undefined) x++;
+            const text = cell(c), w = Math.min(c.colSpan || 1, 50), h = Math.min(c.rowSpan || 1, rows.length - y);
+            for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) out[y + dy][x + dx] = text;
+            x += w;
+          }
+        });
+        return out.map(r => Array.from(r, v => v ?? ''));
+      };
+      return deep(document, e => isTable(e) && shown(e) && !e.querySelector('table,[role=table],[role=grid]')).map(t => {
+        const rows = grid((t.tagName === 'TABLE' ? [...t.rows] : [...t.querySelectorAll('[role=row]')]).filter(shown))
+          .filter(cells => cells.some(Boolean));
+        const head = heads.filter(h => h.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING).at(-1);
+        return [clean(t.caption?.innerText || t.getAttribute('aria-label') || head?.innerText || '').slice(0, 80), rows];
+      }).filter(([, rows]) => rows.some(r => r.length > 1));
     },
     expand: (ids, verify = false) => {
       const check = e => {

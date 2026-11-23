@@ -5,7 +5,8 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { env, HOME, PROFILE, TAB_FILE, FLOW_FILE, MACROS, VAULT, NAME, VERSION, SOCK, CHROMES, MINE, sleep, endpoint, connect, closeOwn } from './common.mjs';
-import { outline, section, extractor } from './text.mjs';
+import { outline, section, extractor, newLines, onlyNames, keyOf, checkedOutput, ssoOf } from './text.mjs';
+import { guard, store } from './files.mjs';
 import { page } from './page.mjs';
 import { PASSWORD, reveal, vault } from './vault.mjs';
 
@@ -17,13 +18,15 @@ const SEEN = 'innerWidth > 1 && innerHeight > 1'; // 尺寸为 0 的内嵌页面
 // ================= 后台进程：连着浏览器，执行命令 =================
 let B; // 和浏览器的连接
 let P; // 当前标签页 { id, sid, loading, reqs, net }
-let refs = []; // 最近一次给元素编的号：refs[编号-1] = 这个元素在哪个页面（会话）里的第几个
+let refs = []; // 给元素编的号：refs[编号-1] = { s: 在哪个页面（会话）里, i: 网页里认这个元素的记号, 文字…… }
+let latest = []; // 最近一次扫描时列得出的元素（refs 里还留着之后看不到了的）
 let opened = null; // 当前页刚点出来的新标签页
 let dl = null; // 正在进行的下载 { guid, name, state }
 let accepting = false; // 这一次点击弹出确认框时，要不要点“确定”
 let phone = false; // 手机模式
 const pages = new Map(); // 已接入的标签页：会话 id → 同上
 const frames = new Map(); // 已接入的跨站内嵌页面：会话 id → { parent: 上一级的会话 id }
+const seen = new Map(); // 接入过的标签页 id → { sid: 上次接入用的会话, doc: 上次编号时主页面是哪个网页（打开时刻） }
 const notes = []; // 要捎给下一条命令的提示（弹窗内容、连接情况）
 const AUTO = { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }; // 让浏览器把页面里的跨站 iframe 也接进来
 const CHECK_WAIT = 10000;
@@ -130,7 +133,11 @@ async function use(targetId) {
   if (P) await B.send('Target.detachFromTarget', { sessionId: P.sid }).catch(() => {}); // 旧的那个可能已经关了
   P = Object.assign(await attach(targetId), { from });
   if (phone) await phoneOn(P.sid);
-  refs = [];
+  // 这个标签页以前给过的编号换到新连接上接着用（网页没换就还指向原来的元素）；别的标签页、内嵌页面的旧编号会报失效
+  const was = seen.get(targetId);
+  if (was) refs = refs.map(r => (r.s === was.sid ? { ...r, s: P.sid } : r));
+  seen.set(targetId, { ...was, sid: P.sid });
+  latest = [];
   fs.writeFileSync(TAB_FILE, targetId);
   return P;
 }
@@ -159,24 +166,38 @@ async function run(sid, expression) {
 const call = (sid, fn, ...args) => run(sid, `${LIB}.${fn}(${args.map(a => JSON.stringify(a)).join(',')})`);
 const inner = sid => [...frames].filter(([, f]) => f.parent === sid).flatMap(([s]) => [s, ...inner(s)]);
 
-// 给页面和它里面每个看得见的跨站内嵌页面的元素统一编号
+// 给页面和它里面每个看得见的跨站内嵌页面的元素统一编号，返回现在列得出的元素。
+// 换了网页（跳转、刷新）才从 1 重新编：旧网页的编号本来就全部失效了。同一个网页里已有的编号一直不变（ls 也不重新编），
+// 新元素接在后面：AI 手里的编号要么还指向原来那个元素，要么报失效，不会悄悄指到别处
 async function snapshot(sid) {
   const groups = await Promise.all([sid, ...inner(sid)].map(async s => {
-    const rows = await run(s, `${s === sid || SEEN} ? ${LIB}.scan() : []`).catch(() => []); // 正在加载或刚被关掉的内嵌页面就跳过
-    return rows.map(([kind, label, more, field, href, group], i) => ({ s, i, kind, label, more, field, href, group }));
+    const [doc, rows] = await run(s, `${s === sid || SEEN} ? ${LIB}.scan() : [null, []]`).catch(() => [null, []]); // 正在加载或刚被关掉的内嵌页面就跳过
+    return { doc, rows: rows.map(([i, kind, label, more, field, href, group, fresh]) => ({ s, i, kind, label, more, field, href, group, fresh })) };
   }));
-  refs = groups.flat();
-  return refs;
+  const key = r => `${r.s} ${r.i}`, old = new Map(refs.map(r => [key(r), r]));
+  // 已有编号的元素换了文字（比如列表的行被网页拿去显示别的内容）也算新出现：动作之后连同原来的编号再列一次
+  latest = groups.flatMap(g => g.rows).map(r => (old.has(key(r)) && old.get(key(r)).label !== r.label ? { ...r, fresh: true } : r));
+  const tab = top(sid)?.id, doc = groups[0].doc;
+  if (tab && doc && seen.get(tab)?.doc !== doc) {
+    seen.set(tab, { ...seen.get(tab), doc });
+    refs = latest;
+  } else {
+    const now = new Map(latest.map(r => [key(r), r]));
+    refs = [...refs.map(r => now.get(key(r)) ?? r), ...latest.filter(r => !old.has(key(r)))];
+  }
+  return latest;
 }
 const tail = (r, long) => [r.kind, r.label, (long && r.href) || r.more].join('\t').replace(/\t+$/, ''); // 一行里编号后面的部分
 const row = r => `${refs.indexOf(r) + 1}\t${tail(r)}`;
 
 async function pick(sid, t, field) {
   if (/^\d+$/.test(t)) {
-    if (!refs[t - 1]) throw new Error('没有这个编号，请先运行 ls');
-    return refs[t - 1];
+    const r = refs[t - 1];
+    if (!r) throw new Error('没有这个编号，请先运行 ls');
+    if (top(r.s) !== top(sid)) throw new Error('编号已失效，请重新运行 ls'); // 别的标签页、已经关掉的内嵌页面上的编号
+    return r;
   }
-  const all = (await snapshot(sid)).filter(r => r.field === field), q = t.toLowerCase();
+  const all = (await snapshot(sid)).filter(r => field === undefined || r.field === field), q = t.toLowerCase(); // 不给 field：框和按钮都算
   const same = all.filter(r => r.label.toLowerCase() === q);
   const hits = same.length ? same : all.filter(r => r.label.toLowerCase().includes(q));
   if (!hits.length) throw new Error(`页面上找不到“${t}”，先用 ls 看看有什么`);
@@ -184,9 +205,9 @@ async function pick(sid, t, field) {
   if (hits.length > 1) throw new Error(`“${t}”对应 ${hits.length} 个元素，请改用编号：\n${hits.slice(0, 10).map(r => row(r)).join('\n')}`);
   return hits[0];
 }
-// 存流程时优先记文字（下次来编号会变），文字不能唯一指到这个元素时才退回编号
-const refOf = r => (r.label && !/^\d+$/.test(r.label)
-  && refs.filter(x => x.field === r.field && x.label.toLowerCase() === r.label.toLowerCase()).length === 1 ? r.label : String(refs.indexOf(r) + 1));
+// 存流程时优先记文字，文字不能唯一指到这个元素时才退回编号（重放时 run 会先编一遍号，同一个网页从 1 编起，号码对得上）
+const refOf = r => (r.label && !/^\d+$/.test(r.label) && latest.includes(r)
+  && latest.filter(x => x.field === r.field && x.label.toLowerCase() === r.label.toLowerCase()).length === 1 ? r.label : String(refs.indexOf(r) + 1));
 
 async function read(sid) {
   const frames = inner(sid).map(async s => {
@@ -202,30 +223,55 @@ async function read(sid) {
 async function look(sid, origin = null) {
   const expected = JSON.stringify(origin);
   const snapshot = await run(sid, `${expected} === null || performance.timeOrigin === ${expected}
-    ? [performance.timeOrigin, ${LIB}.all()] : null`);
+    ? [performance.timeOrigin, location.pathname, ${LIB}.all()] : null`);
   if (!snapshot) return null;
-  const [t0, top] = snapshot;
+  const [t0, path, main] = snapshot;
   const rest = await Promise.all(inner(sid).map(s => run(s, `${SEEN} ? ${LIB}.all() : ''`).catch(() => ''))); // 正在加载或刚关掉的内嵌页面就跳过
-  return { t0, lines: [top, ...rest].flatMap(text => text.split('\n').filter(Boolean)) };
+  return { t0, path, lines: [main, ...rest].flatMap(text => text.split('\n').filter(Boolean)) };
 }
-const before = sid => look(sid).catch(() => null); // 读不到（页面正在跳转）就不比较
+// 动作之前：读一遍文字，并给页面上已有的元素做个记号（动作之后据此找出新冒出来的按钮、链接、输入框）
+const before = sid => look(sid).then(async was => {
+  await Promise.all([sid, ...inner(sid)].map(s => run(s, `${LIB}.mark()`).catch(() => {}))); // 正在加载的内嵌页面就跳过
+  return was;
+}).catch(() => null); // 读不到（页面正在跳转）就不比较
 const NEWS = 2000; // 新内容最多给这么多字：再多多半是整页换了内容，AI 该先 cat --outline
+const NEW_ELEMENTS = 30; // 新出现的可点元素最多列这么多个
 async function news(sid, was) {
   const now = was && await look(sid, was.t0).catch(() => null);
-  if (!now) return '';
-  const counts = new Map();
-  for (const line of was.lines) counts.set(line, (counts.get(line) ?? 0) + 1);
-  const added = [];
-  for (const line of now.lines) {
-    const count = counts.get(line) ?? 0;
-    if (count) counts.set(line, count - 1);
-    else added.push(line);
+  // 跳到了新网页，或者单页应用换了路径（整页内容都换了）：只报位置，要看内容就 cat、ls
+  if (!now || now.path !== was.path) return '';
+  // 新冒出来的按钮、链接、输入框直接带上编号（比如点开菜单后的选项），AI 不用再 ls 一遍就能点
+  const fresh = (await snapshot(sid).catch(() => [])).filter(r => r.fresh);
+  // 文字里只是这些按钮上的字的行就不再重复（“Menu About Menu Close”这种），省字数
+  const names = fresh.slice(0, NEW_ELEMENTS).map(r => r.label).filter(Boolean);
+  const text = newLines(was.lines, now.lines).filter(l => !onlyNames(l, names));
+  let out = '';
+  if (text.length) {
+    const content = text.join('\n');
+    const more = content.length > NEWS ? '\n（还有新内容：cat --outline 看结构，或 cat | grep 找）' : '';
+    out += `\n新出现：\n${content.slice(0, NEWS).toWellFormed()}${more}`;
   }
-  if (!added.length) return '';
-  const content = added.join('\n');
-  const preview = content.slice(0, NEWS).toWellFormed();
-  const more = content.length > NEWS ? '\n（还有新内容：cat --outline 看结构，或 cat | grep 找）' : '';
-  return `\n新出现：\n${preview}${more}`;
+  if (fresh.length) {
+    const rows = fresh.slice(0, NEW_ELEMENTS).map(r => row(r)).join('\n');
+    const more = fresh.length > NEW_ELEMENTS ? `\n（还有 ${fresh.length - NEW_ELEMENTS} 个：用 ls 看）` : '';
+    out += `\n新出现的可点、可填：\n${rows}${more}`;
+  }
+  return out;
+}
+
+// 被限流、被拦截、要人机验证：直接写在结果里，别让 AI 对着错误页继续干
+async function warn(p) {
+  const url = await run(p.sid, 'location.href').catch(() => '');
+  // 网站报错又什么都不返回时，浏览器显示自己的错误页（chrome-error://），状态码照样算这次打开的
+  const r = p.response, http = r && url && (url.startsWith('chrome-error:') || r.url.split('#')[0] === url.split('#')[0]) ? r.status : 0;
+  p.response = null; // 每打开一次网页只提醒一次，这一页后面的动作不再重复
+  const why = await call(p.sid, 'blocked').catch(() => '')
+    || (http === 429 ? '被限流了（HTTP 429）：先停一会儿再继续，别连续发请求'
+      : http >= 500 ? `网站出错（HTTP ${http}）：可能是被限流或网站故障，稍后再试`
+        : http === 401 ? '需要登录或认证（HTTP 401）'
+          : http === 404 || http === 410 ? `服务器返回 HTTP ${http}（页面可能不存在）`
+            : http >= 400 ? `网站拒绝了这次访问（HTTP ${http}）` : '');
+  return why ? `\n注意：${why}` : '';
 }
 
 // shortcut: 没有网站给出的就绪信号时，以 250ms 内文字长度和请求无变化为准；延迟更久才开始加载的详情需要用 expand --extract 校验。
@@ -252,13 +298,20 @@ async function waitForPage(p, deadline = Infinity) {
 // was：动作之前 before() 读到的页面，给了就在结果后面附上新出现的文字
 async function settle(p, was) {
   await waitForPage(p);
-  if (pages.has(p.sid)) return (await call(p.sid, 'loc')) + await news(p.sid, was);
+  if (pages.has(p.sid)) return (await call(p.sid, 'loc')) + await warn(p) + await news(p.sid, was);
   // 弹出的窗口（比如“用 Google 登录”）做完会自己关掉：回到打开它的那个标签页
   if (!p.from) throw new Error('这个标签页已经被关掉了，用 tab 换一个');
   return `（弹出的窗口已关闭，已切回原来的标签页）\n${await settle(await use(p.from))}`;
 }
 
-// 点一个元素；点出了新标签页（比如“用 Google 登录”的弹窗）就跟过去，弹窗做完自己关掉时 settle 会再切回来
+// 动作点出了新标签页（比如“用 Google 登录”的弹窗）就跟过去，弹窗做完自己关掉时 settle 会再切回来。动作之前要先把 opened 清空
+async function follow(p, loc) {
+  if (!opened) return loc;
+  const np = Object.assign(await use(opened), { from: p.id });
+  return `（打开了新标签页，已切换过去；用 tab 可以切回去）\n${await settle(np)}`;
+}
+
+// 点一个元素
 async function tap(p, r, done) {
   opened = null;
   const was = await before(p.sid);
@@ -267,35 +320,35 @@ async function tap(p, r, done) {
   if (did.stop) throw human(did.stop);
   if (did.x !== undefined) await mouse(p.sid, did.x, did.y).catch(gone); // 网页里已经确认过那个位置正是这个元素
   done();
-  const loc = await settle(p, was);
-  if (!opened) return loc;
-  const np = Object.assign(await use(opened), { from: p.id });
-  return `（打开了新标签页，已切换过去；用 tab 可以切回去）\n${await settle(np)}`;
+  return follow(p, await settle(p, was));
 }
-
-// 第三方登录：按钮上写着这些名字之一，并且像是登录按钮（“Continue with Google”“使用 Apple 登录”，或只有一个名字的图标按钮）
-const SSO = ['Google', 'Apple', 'Microsoft', 'GitHub', 'Facebook'];
-const ssoOf = label => SSO.find(n => new RegExp(`\\b${n}\\b`, 'i').test(label)
-  && (/sign|log|continue|with|登录|登入|使用|继续/i.test(label) || label.trim().toLowerCase() === n.toLowerCase()));
 
 async function goto(p, url, settlePage = true) {
   p.response = null;
   const r = await B.send('Page.navigate', { url }, p.sid);
-  if (!r.errorText && !r.isDownload) return settlePage ? settle(p) : undefined;
+  if (!r.errorText && !r.isDownload && !settlePage) return undefined;
+  if (!r.errorText && !r.isDownload) {
+    const loc = await settle(p);
+    // 要去的不是登录页，却被转到了登录页：多半是没登录
+    const now = await run(p.sid, 'location.href').catch(() => url), login = u => LOGIN_PATH.test(new URL(u).pathname);
+    return loc + (now !== url && login(now) && !login(url) ? '\n注意：跳到了登录页，需要先登录（用 login）' : '');
+  }
   if (r.isDownload) throw new Error('这个网址返回了下载文件');
   // 打不开时浏览器会停在错误页上：退回原来的页面，就像 cd 到不存在的目录后人还在原地
   await sleep(300);
   const stuck = await run(p.sid, 'location.href').then(u => u.startsWith('chrome-error:'), () => false);
   const h = await B.send('Page.getNavigationHistory', {}, p.sid);
   if (stuck && h.currentIndex > 0) await B.send('Page.navigateToHistoryEntry', { entryId: h.entries[h.currentIndex - 1].id }, p.sid);
-  throw new Error(`打不开 ${url}：${r.errorText}`);
+  // 网站报错又什么都不返回时，浏览器只说 ERR_HTTP_RESPONSE_CODE_FAILURE：把状态码和该怎么办说清楚
+  const code = p.response?.status >= 400 ? p.response.status : 0;
+  throw new Error(`打不开 ${url}：${r.errorText}${code === 429 ? '（HTTP 429：被限流了，先停一会儿再继续，别连续发请求）' : code ? `（HTTP ${code}）` : ''}`);
 }
 
+const LOGIN_PATH = /(?:^|\/)(?:authwall|login|log-in|signin|sign-in|checkpoint)(?:\/|$)/i;
 function pageStatus(p, url) {
   const http = p.response?.url.split('#')[0] === url.split('#')[0] ? p.response.status : 0;
-  const pathname = new URL(url).pathname;
   if (http === 429) return 'rate-limited';
-  if (http === 401 || /(?:^|\/)(?:authwall|login|log-in|signin|sign-in|checkpoint)(?:\/|$)/i.test(pathname)) return 'login';
+  if (http === 401 || LOGIN_PATH.test(new URL(url).pathname)) return 'login';
   if (http >= 400) return `http-${http}`;
 }
 
@@ -330,19 +383,41 @@ async function readChecked(p, extract, sec, expected, deadline) {
     ...(status === 'incomplete' && sec && !result ? { message: `没有找到段落“${sec}”` } : {}) };
 }
 
-function checkedOutput(pages, listing) {
-  const output = pages.map(({ requested, url, status, count = 0, markers = 0, next, lines, message }) => {
-    const source = url && url !== 'about:blank' && url !== requested ? `${requested} → ${url}` : requested;
-    return [`==> ${source} | ${status} | ${count}/${markers} | next=${next ?? '未知'} <==`, message, ...(lines ?? [])]
-      .filter(Boolean).join('\n');
-  });
-  return [...listing, ...output].join('\n');
+const press = async (sid, key, vk, text, modifiers = 0, code = key) => {
+  await B.send('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', key, code, windowsVirtualKeyCode: vk, text, modifiers }, sid);
+  await B.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk, modifiers }, sid);
+};
+// 后退 / 前进：和浏览器的按钮一样
+async function travel(p, step) {
+  const h = await B.send('Page.getNavigationHistory', {}, p.sid);
+  const to = h.entries[h.currentIndex + step];
+  if (!to || to.url === 'about:blank') throw new Error(step < 0 ? '已经是最早的一页了，没法再后退' : '已经是最新的一页了，没法再前进');
+  const was = await before(p.sid), here = `[location.href, performance.timeOrigin]`;
+  const [, t0] = await run(p.sid, here).catch(() => []);
+  p.response = null;
+  await B.send('Page.navigateToHistoryEntry', { entryId: to.id }, p.sid);
+  // 真到了那一页（网址对上了，或者换成了另一个网页——回去时被转走了也算）再等它稳定，最多等 5 秒
+  for (let i = 0; i < 50; i++) {
+    const [url, t] = await run(p.sid, here).catch(() => []);
+    if (url === to.url || (t && t !== t0)) break;
+    await sleep(100);
+  }
+  // 走到了上次打不开的那一页（浏览器自己的错误页）：退回来，像 cd 打不开时一样
+  if ((await run(p.sid, 'location.href').catch(() => '')).startsWith('chrome-error:')) {
+    await B.send('Page.navigateToHistoryEntry', { entryId: h.entries[h.currentIndex].id }, p.sid);
+    throw new Error(`打不开 ${to.url}`);
+  }
+  record([step < 0 ? 'back' : 'forward']);
+  return settle(p, was);
 }
 
-const press = async (sid, key, code, text) => {
-  await B.send('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', key, code: key, windowsVirtualKeyCode: code, text }, sid);
-  await B.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: code }, sid);
-};
+// 网页里的表格：每张一个标题行（## 表格 N：标题（R 行 × C 列）），下面一行一条、各格用 Tab 隔开；配 --outline / --section 看某一张
+async function tables(sid) {
+  const all = (await Promise.all([sid, ...inner(sid)].map(s => run(s, `${s === sid || SEEN} ? ${LIB}.tables() : []`).catch(() => [])))).flat();
+  if (!all.length) return '（这个页面上没有表格；不是表格的列表可以用 cat | extract 取字段）';
+  return all.map(([title, rows], k) => [`## 表格 ${k + 1}：${title}（${rows.length} 行 × ${Math.max(...rows.map(r => r.length))} 列）`, // 冒号一直在：“表格 1：”不会也对上表格 10
+    ...rows.map(r => r.join('\t'))].join('\n')).join('\n');
+}
 // 像人一样移过去、按下、松开鼠标左键（坐标是整个标签页里的位置）
 const mouse = async (sid, x, y) => {
   for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
@@ -350,37 +425,6 @@ const mouse = async (sid, x, y) => {
   }
 };
 const record = (argv, fresh) => fs[fresh ? 'writeFileSync' : 'appendFileSync'](FLOW_FILE, JSON.stringify(argv) + '\n');
-// 截图和 PDF 存成文件，返回完整路径；没给文件名就存到 ~/.webshell/shots
-// AI 指定的本机路径（上传、下载、截图）：网页内容可能诱导 AI 去碰敏感位置，这些地方一律拒绝——
-// WebShell 自己的数据（密码本、浏览器登录资料）、点开头的配置目录（.ssh、.aws……）、浏览器资料目录、开机启动目录
-// shortcut: 按位置名拦截，拦不住所有敏感文件；要更严就改成只允许指定的文件夹
-// （Windows 的开机启动在 Start Menu\…\Startup，macOS 在 LaunchAgents / LaunchDaemons，浏览器资料在 User Data / Application Support，Linux 的都在点开头的目录里）
-const SENSITIVE = /^(\..+|user data|start menu|startup|launchagents|launchdaemons|application support)$/i;
-function guard(p) {
-  // 还原成真实路径，防止借链接绕过：要写的文件、文件夹可能还不存在，就从最深一层已存在的文件夹算起，再接上后面的部分
-  let dir = path.resolve(p);
-  const rest = [];
-  for (;;) {
-    try { dir = fs.realpathSync(dir); break; } catch { /* 这一层还不存在：往上找 */ }
-    const up = path.dirname(dir);
-    if (up === dir) break;
-    rest.unshift(path.basename(dir));
-    dir = up;
-  }
-  const real = path.join(dir, ...rest);
-  const inside = (dir, f) => !path.relative(dir, f).startsWith('..') && !path.isAbsolute(path.relative(dir, f));
-  if (inside(path.resolve(HOME), real) || real.split(path.sep).some(s => SENSITIVE.test(s))) {
-    throw Object.assign(new Error(`为了安全，不读写这个位置：${real}`), { exit: 2 });
-  }
-  return real;
-}
-const store = (file, ext, base64) => {
-  const out = file ? guard(file) : path.join(HOME, 'shots', `${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`);
-  if (file && fs.existsSync(out)) throw new Error(`已经有这个文件了，不覆盖：${out}`);
-  fs.mkdirSync(path.dirname(out), { recursive: true });
-  fs.writeFileSync(out, Buffer.from(base64, 'base64'));
-  return out;
-};
 
 export const cmds = {
   async cd(p, [arg]) {
@@ -400,7 +444,9 @@ export const cmds = {
 
   async ls(p, args) {
     const rows = await snapshot(p.sid), lines = rows.map(r => tail(r, args.includes('-l')));
-    if (args.includes('--all')) return lines.map((line, i) => `${i + 1}\t${line}`).join('\n');
+    // 按页面上的顺序列；编号是每个元素自己的号（同一个网页里一直不变，所以不一定连着）
+    const num = new Map(refs.map((r, k) => [r, k + 1])), n = i => num.get(rows[i]);
+    if (args.includes('--all')) return lines.map((line, i) => `${n(i)}\t${line}`).join('\n');
     // 长表单：只列表单里的框和按钮，按小标题分组，同名的框（收货地址、账单地址里都有的“First name”）一眼分得清
     if (args.includes('--form')) {
       const out = [];
@@ -409,18 +455,18 @@ export const cmds = {
         if (r.group == null) return;
         if (r.group !== last) out.push(`## ${r.group || '（没有标题）'}`);
         last = r.group;
-        out.push(`${i + 1}\t${lines[i]}`);
+        out.push(`${n(i)}\t${lines[i]}`);
       });
       return out.join('\n') || '（这个页面上没有表单）';
     }
     // 引用角标（[1]、[note 2]）和“Jump up”这类回跳链接只在本页内跳转，几乎用不着点，维基百科上却有好几百个：不列出
     // （只认这几种写法：网站用 href="#..." 做的标签页、折叠按钮照样列出）
-    const keep = rows.flatMap((r, i) => (r.kind === 'link' && !r.href && /^(\[[^\]]{1,20}\]|\^|↑|jump up.*)$/i.test(r.label) ? [] : [i + 1]));
+    const keep = rows.flatMap((r, i) => (r.kind === 'link' && !r.href && /^(\[[^\]]{1,20}\]|\^|↑|jump up.*)$/i.test(r.label) ? [] : [i]));
     // 一模一样的行出现 5 次以上（每条新闻都有的“upvote”）合成一行：编号用逗号全列在第一列，照样能按编号点
-    const nums = Map.groupBy(keep, n => lines[n - 1]);
-    const out = keep.flatMap(n => {
-      const g = nums.get(lines[n - 1]);
-      return g.length < 5 ? [`${n}\t${lines[n - 1]}`] : g[0] === n ? [`${g.join(',')}\t${lines[n - 1]}`] : [];
+    const same = Map.groupBy(keep, i => lines[i]);
+    const out = keep.flatMap(i => {
+      const g = same.get(lines[i]);
+      return g.length < 5 ? [`${n(i)}\t${lines[i]}`] : g[0] === i ? [`${g.map(n).join(',')}\t${lines[i]}`] : [];
     });
     if (keep.length < lines.length) out.push(`（另有 ${lines.length - keep.length} 个引用角标、回跳链接没列出：ls --all 看全部）`);
     return out.join('\n');
@@ -434,9 +480,10 @@ export const cmds = {
       if (hasValue && !v) throw new Error(`用法：cat [网址...] ${flag} <名字>`);
       return hasValue ? v : true;
     };
-    const field = take('--field', true), sec = take('--section', true), toc = take('--outline', false);
+    const field = take('--field', true), sec = take('--section', true), toc = take('--outline', false), table = take('--table', false);
     const pattern = take('--extract', true), marker = take('--check', true), size = take('--expect', true);
     const follow = take('--follow', true), limit = take('--limit', true);
+    if (table && (field || pattern)) throw new Error('用法：cat [网址...] --table [--outline | --section "表格 2："]');
     if (((marker || size || follow || limit) && !pattern) || (pattern && (!marker || field || toc))
       || (follow && args.length > 1) || (limit && !follow)
       || [size, limit].some(n => n && (!/^[1-9]\d*$/.test(n) || !Number.isSafeInteger(+n)))) {
@@ -444,7 +491,7 @@ export const cmds = {
     }
     const extract = pattern && extractor([pattern, '--check', marker], size ? +size : undefined);
     const shape = text => (toc ? outline(text) : sec ? section(text, sec) : text);
-    const get = async sid => (field ? await call(sid, 'field', field) || '（未找到）' : shape(await read(sid)));
+    const get = async sid => (field ? await call(sid, 'field', field) || '（未找到）' : shape(table ? await tables(sid) : await read(sid)));
     const withPage = async (u, fn, settlePage = true) => {
       const { targetId } = await B.send('Target.createTarget', { url: 'about:blank', background: true });
       let timer;
@@ -681,9 +728,60 @@ export const cmds = {
     phone = mode === 'on';
     // 关掉时重新接入这个标签页：模拟设置跟着旧连接一起作废，比一项项改回去简单
     const np = phone ? (await phoneOn(p.sid), p) : await use(p.id);
-    await B.send('Page.reload', {}, np.sid);
+    // 重新打开这一页才生效。用“打开网址”而不是“刷新”：刷新会把提交表单得到的页面再提交一次（比如重复下单）
+    await B.send('Page.navigate', { url: await run(np.sid, 'location.href') }, np.sid);
     return settle(np);
   },
+
+  // 按键：Escape 关弹窗、Tab 换下一个框、方向键选候选。给了编号或文字，就先把焦点放到那个元素上
+  async press(p, [spec, t]) {
+    if (!spec) throw new Error('用法：press <键> [编号|文字]，键如 Enter Escape Tab ArrowDown Space，可加 Shift+ / Control+');
+    const k = keyOf(spec);
+    const r = t ? await pick(p.sid, t) : null;
+    const was = await before(p.sid);
+    if (r) await call(r.s, 'focusAt', r.i);
+    // 键发给谁就查谁：给了元素查它所在的页面；没给就发给主页面（焦点在跨站内嵌页面里时会转进去），每个内嵌页面也查。
+    // 焦点在付款、授权、银行卡、验证码、密码相关的地方就不按；主页面查不了也不按
+    for (const s of r ? [r.s] : [p.sid, ...inner(p.sid)]) {
+      const stop = await run(s, `${LIB}.keyStop(${JSON.stringify(k.key)}, ${s === p.sid})`)
+        .catch(e => (s === p.sid ? `没法检查焦点所在的元素（${e.message}）` : ''));
+      if (stop) throw human(stop);
+    }
+    opened = null;
+    await press(r?.s ?? p.sid, k.key, k.vk, k.text, k.mods, k.code);
+    record(['press', spec, ...(r ? [refOf(r)] : [])]);
+    return follow(p, await settle(p, was));
+  },
+
+  // 鼠标悬停：悬停才展开的菜单。展开后新出现的选项会带编号列出来
+  async hover(p, [t]) {
+    if (!t) throw new Error('用法：hover <编号|文字>');
+    const r = await pick(p.sid, t);
+    const was = await before(p.sid);
+    const did = await call(r.s, 'hover', r.i);
+    if (did.x !== undefined) await B.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: did.x, y: did.y, button: 'none' }, p.sid);
+    record(['hover', refOf(r)]);
+    return settle(p, was);
+  },
+
+  // 等到页面上出现某段文字（单页应用常要等几秒内容才出来），默认最多等 10 秒
+  async wait(p, [want, secs = '10']) {
+    const limit = Number(secs);
+    if (!want || !(limit > 0 && limit <= 60)) throw new Error('用法：wait <文字> [秒数，最多 60]');
+    const q = want.toLowerCase(), end = Date.now() + limit * 1000;
+    for (;;) {
+      const hits = (await look(p.sid).catch(() => null))?.lines.filter(l => l.toLowerCase().includes(q)) ?? []; // 正在跳转时读不到，接着等
+      if (hits.length) {
+        record(['wait', want, secs]);
+        return `${await call(p.sid, 'loc')}\n找到：\n${hits.slice(0, 5).map(l => l.slice(0, 300)).join('\n')}`;
+      }
+      if (Date.now() > end) throw new Error(`等了 ${secs} 秒，页面上还没有出现“${want}”`);
+      await sleep(250);
+    }
+  },
+
+  async back(p) { return travel(p, -1); },
+  async forward(p) { return travel(p, 1); },
 
   async run(p, [name, ...params]) {
     const file = path.join(MACROS, `${name}.jsonl`);
@@ -691,8 +789,11 @@ export const cmds = {
     let out;
     for (const line of fs.readFileSync(file, 'utf8').trim().split('\n')) {
       const [cmd, ...args] = JSON.parse(line).map(a => a.replace(/\$(\d)/g, (m, n) => params[n - 1] ?? m));
-      if (!['cd', 'click', 'type', 'login'].includes(cmd)) throw new Error(`流程文件里有不认识的命令：${cmd}`);
-      out = await cmds[cmd](P ?? p, args); // 中途点出了新标签页时，后面的步骤在新标签页上做
+      if (!['cd', 'click', 'type', 'login', 'press', 'hover', 'wait', 'back', 'forward'].includes(cmd)) throw new Error(`流程文件里有不认识的命令：${cmd}`);
+      const tab = P ?? p; // 中途点出了新标签页时，后面的步骤在新标签页上做
+      // 记下的编号是录的时候看到的：先编一遍号（同一个网页从 1 编起），和录的时候对得上
+      if (/^(click|type|press|hover)$/.test(cmd) && args.some(a => /^\d+$/.test(a))) await snapshot(tab.sid);
+      out = await cmds[cmd](tab, args);
     }
     return out;
   },

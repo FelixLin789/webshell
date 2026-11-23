@@ -14,7 +14,7 @@ export const MACROS = path.join(HOME, 'macros');
 export const VAULT = path.join(HOME, 'vault.json');
 export const NAME = /^[\p{L}\p{N}_-]+$/u; // 流程名会变成文件名，不允许出现路径符号
 // 所有代码文件里最新的修改时间：代码改过之后，旧的后台进程会让位给新的
-export const VERSION = Math.max(...['webshell.mjs', 'daemon.mjs', 'common.mjs', 'text.mjs', 'page.mjs', 'vault.mjs'].map(f => fs.statSync(fileURLToPath(new URL(f, import.meta.url))).mtimeMs));
+export const VERSION = Math.max(...['webshell.mjs', 'daemon.mjs', 'common.mjs', 'text.mjs', 'page.mjs', 'vault.mjs', 'files.mjs'].map(f => fs.statSync(fileURLToPath(new URL(f, import.meta.url))).mtimeMs));
 // 后台进程监听的本机管道。网页连不到管道（不像 HTTP 端口），所以不需要口令
 export const SOCK = process.platform === 'win32'
   ? `\\\\.\\pipe\\webshell-${createHash('md5').update(HOME).digest('hex')}` : path.join(HOME, 'sock');
