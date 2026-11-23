@@ -741,10 +741,10 @@ export const cmds = {
     const was = await before(p.sid);
     if (r) await call(r.s, 'focusAt', r.i);
     // 键发给谁就查谁：给了元素查它所在的页面；没给就发给主页面（焦点在跨站内嵌页面里时会转进去），每个内嵌页面也查。
-    // 焦点在付款、授权、银行卡、验证码、密码相关的地方就不按；主页面查不了也不按
+    // 焦点在付款、授权、银行卡、验证码、密码相关的地方就不按；给了元素时焦点必须还在它上面；还连着的页面查不了也不按
     for (const s of r ? [r.s] : [p.sid, ...inner(p.sid)]) {
-      const stop = await run(s, `${LIB}.keyStop(${JSON.stringify(k.key)}, ${s === p.sid})`)
-        .catch(e => (s === p.sid ? `没法检查焦点所在的元素（${e.message}）` : ''));
+      const stop = await run(s, `${LIB}.keyStop(${JSON.stringify(k.key)}, ${s === p.sid}, ${JSON.stringify(r?.i ?? null)})`)
+        .catch(e => (s === p.sid || frames.has(s) ? `没法检查焦点所在的元素（${e.message}）` : ''));
       if (stop) throw human(stop);
     }
     opened = null;

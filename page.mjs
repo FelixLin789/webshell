@@ -208,8 +208,10 @@ export function page() {
     },
     // 按键之前查焦点所在的元素：回车、空格等于点按钮或提交表单，方向键、退格会改单选框、下拉框和输入框。
     // 不看 document.hasFocus()：跨站内嵌页面里它常是 false，焦点却实实在在落在付款按钮上（查严一点只会多拒绝几次）
-    keyStop: (key, main) => {
+    keyStop: (key, main, target) => {
       const e = focused(), activating = key === 'Enter' || key === ' ';
+      // 给了元素：焦点必须还在它上面（网页可能在获得焦点时把焦点挪到别处，比如挪进付款框）
+      if (target != null && e !== at(target)) return '焦点没停在指定的元素上（网页把它挪走了）';
       if (!e || e === e.ownerDocument.body || e === e.ownerDocument.documentElement) {
         // 焦点不在任何元素上时，网页可能把回车、空格当成点它的主按钮（有的确认框就这样）：主页面上看得见付款、授权按钮就不按
         return activating && main && deep(document, x => notField(x) && shown(x) && humanOnly(x)).length

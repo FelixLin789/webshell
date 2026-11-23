@@ -96,6 +96,7 @@ const TOOLS = `<title>Tools</title><style>#sub { display: none; position: absolu
 <button onclick="history.pushState({}, '', '/tools/next'); document.querySelector('h1').textContent = 'Next page'">Route</button>`;
 // 付款控件放在别的网站嵌进来的页面里（Stripe、PayPal 都这样），还有认不出名字的按钮；?focus：内嵌页面自己把焦点放到付款按钮上
 const PAYFRAME = q => `<title>Pay frame</title><input placeholder="Before"><x-closed></x-closed>
+<input placeholder="Jumpy" onfocus="setTimeout(() => document.querySelector('iframe').focus())">
 <iframe src="/xpay${q}" width="400" height="160"></iframe>
 ${q ? '' : '<form action="/search"><input name="gift" placeholder="Gift note"><input type="image" alt="Buy now" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></form>'}
 <script>customElements.define('x-closed', class extends HTMLElement { connectedCallback() {
@@ -384,6 +385,7 @@ test('按键也拦得住：跨站内嵌页面里的付款按钮和银行卡框�
   assert.match(ls, /\tbutton\tBuy now\t（需本人点击）$/m); // 图片按钮用 alt 当名字
   for (const args of [['press', 'Enter', 'Pay frame'], ['press', 'Space', 'Pay frame'], ['press', 'Enter', 'Frame card'],
     ['press', 'Control+Enter', 'Frame card'], ['press', 'ArrowDown', 'Frame card'], ['press', 'Enter', 'Gift note'],
+    ['press', 'Enter', 'Jumpy'], // 得到焦点就把焦点挪进付款框的框
     ['type', 'Gift note', 'x', '--enter']]) {
     const r = await ws(...args);
     assert.equal(r.code, 2, args.join(' '));
